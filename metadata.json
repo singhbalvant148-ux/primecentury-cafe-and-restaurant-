@@ -1,0 +1,6 @@
+{
+  "name": "My Restaurant POS",
+  "description": "Simple, clean, and fast web-based restaurant Point of Sale system with table management, KOT, menu ordering, GST billing, and daily sales reports in Indian Rupees (₹).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
