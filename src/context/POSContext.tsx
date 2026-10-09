@@ -17,6 +17,7 @@ import {
   PrinterPaperWidth,
   PrinterMode,
   PrinterStatus,
+  DailySalesResponse,
 } from '../types/pos';
 import {
   INITIAL_USERS,
@@ -62,6 +63,9 @@ interface POSContextType {
   activeView: AppView;
   setActiveView: (view: AppView) => void;
   hasPermission: (view: AppView) => boolean;
+  authToken: string | null;
+  deleteBill: (billId: string) => Promise<{ success: boolean; message?: string }>;
+  fetchDailySales: (dateString: string) => Promise<DailySalesResponse | null>;
 
   // Users Management
   users: User[];
@@ -180,6 +184,7 @@ interface POSContextType {
 
 const STORAGE_KEYS = {
   USER: 'my_pos_user',
+  AUTH_TOKEN: 'my_pos_auth_token',
   USERS: 'my_pos_users_list',
   TABLES: 'my_pos_tables',
   MENU: 'my_pos_menu',
@@ -297,6 +302,48 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [activeTableId, setActiveTableId] = useState<number | null>(1);
   const [billToPrint, setBillToPrint] = useState<Bill | null>(null);
   const [kotToPrint, setKotToPrint] = useState<KOT | null>(null);
+
+  // Authenticated cryptographic session token
+  const [authToken, setAuthToken] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(STORAGE_KEYS.AUTH_TOKEN);
+    } catch {
+      return null;
+    }
+  });
+
+  // Verify or auto-obtain cryptographic session token
+  useEffect(() => {
+    const savedToken = localStorage.getItem(STORAGE_KEYS.AUTH_TOKEN);
+    if (savedToken) {
+      fetch('/api/auth/verify', {
+        headers: { Authorization: `Bearer ${savedToken}` },
+      })
+        .then((res) => {
+          if (!res.ok) {
+            localStorage.removeItem(STORAGE_KEYS.AUTH_TOKEN);
+            setAuthToken(null);
+          } else {
+            setAuthToken(savedToken);
+          }
+        })
+        .catch(() => {});
+    } else if (currentUser) {
+      fetch('/api/auth/quick-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: currentUser.role }),
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.success && data.token) {
+            setAuthToken(data.token);
+            localStorage.setItem(STORAGE_KEYS.AUTH_TOKEN, data.token);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [currentUser?.role]);
 
   // Bluetooth Thermal Printer state
   const [printerStatus, setPrinterStatus] = useState<PrinterStatus>(bluetoothPrinter.getStatus());
@@ -680,17 +727,17 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   }, []);
 
-  // Permissions helper
+  // Permissions helper (Strict Owner-Only Daily Sales / Reports Access)
   const hasPermission = (view: AppView): boolean => {
     if (!currentUser) return false;
     const role = currentUser.role;
     switch (role) {
       case 'owner':
-        return true; // ONLY the Owner can access 'menu_management' and 'users'
+        return true; // ONLY Owner can access 'reports' (Daily Sales), 'menu_management' and 'users'
       case 'manager':
-        return ['dashboard', 'tables', 'menu', 'orders', 'kitchen', 'billing', 'reports'].includes(view);
+        return ['dashboard', 'tables', 'menu', 'orders', 'kitchen', 'billing'].includes(view);
       case 'cashier':
-        return ['dashboard', 'tables', 'menu', 'orders', 'billing', 'reports'].includes(view);
+        return ['dashboard', 'tables', 'menu', 'orders', 'billing'].includes(view);
       case 'waiter':
         return ['dashboard', 'tables', 'menu', 'orders', 'kitchen'].includes(view);
       case 'kitchen':
@@ -734,6 +781,22 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setCurrentUser(cleanUser);
+
+    // Secure backend token generation & verification
+    fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: cleanUsername, password: cleanPass }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success && data.token) {
+          setAuthToken(data.token);
+          localStorage.setItem(STORAGE_KEYS.AUTH_TOKEN, data.token);
+        }
+      })
+      .catch((err) => console.warn('Server auth login warning:', err));
+
     if (found.role === 'kitchen') {
       setActiveView('kitchen');
     } else {
@@ -757,6 +820,22 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         createdAt: found.createdAt,
       };
       setCurrentUser(cleanUser);
+
+      // Secure backend token for role
+      fetch('/api/auth/quick-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role }),
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.success && data.token) {
+            setAuthToken(data.token);
+            localStorage.setItem(STORAGE_KEYS.AUTH_TOKEN, data.token);
+          }
+        })
+        .catch((err) => console.warn('Server quick-login warning:', err));
+
       if (found.role === 'kitchen') {
         setActiveView('kitchen');
       } else {
@@ -767,6 +846,9 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const logout = () => {
     setCurrentUser(null);
+    setAuthToken(null);
+    localStorage.removeItem(STORAGE_KEYS.USER);
+    localStorage.removeItem(STORAGE_KEYS.AUTH_TOKEN);
   };
 
   // User Management Methods (Owner ONLY)
@@ -1471,7 +1553,98 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return updated;
     });
 
+    // 4. Sync settled bill to server database
+    try {
+      const token = authToken || localStorage.getItem(STORAGE_KEYS.AUTH_TOKEN);
+      fetch('/api/bills', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(finalBill),
+      }).catch((e) => console.warn('Could not sync settled bill to server:', e));
+    } catch (e) {
+      console.error(e);
+    }
+
     return true;
+  };
+
+  // Owner-Only Bill Deletion Method
+  const deleteBill = async (billId: string): Promise<{ success: boolean; message?: string }> => {
+    if (!currentUser || currentUser.role !== 'owner') {
+      return {
+        success: false,
+        message: 'Forbidden: Only an authenticated Owner can delete bills from the system.',
+      };
+    }
+
+    const targetBill = bills.find((b) => b.id === billId);
+    if (!targetBill) {
+      return {
+        success: false,
+        message: `Bill with ID "${billId}" not found in current ledger.`,
+      };
+    }
+
+    const token = authToken || localStorage.getItem(STORAGE_KEYS.AUTH_TOKEN);
+    try {
+      const res = await fetch(`/api/bills/${encodeURIComponent(billId)}`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        return {
+          success: false,
+          message: errJson.error || `Server rejected deletion (HTTP ${res.status}).`,
+        };
+      }
+    } catch (e) {
+      console.warn('Network call failed, applying client deletion fallback:', e);
+    }
+
+    // Safely remove bill from state & localStorage
+    setBills((prev) => {
+      const updated = prev.filter((b) => b.id !== billId);
+      try {
+        localStorage.setItem(STORAGE_KEYS.BILLS, JSON.stringify(updated));
+      } catch (e) {
+        console.error(e);
+      }
+      return updated;
+    });
+
+    return {
+      success: true,
+      message: `Bill ${targetBill.billNumber} (₹${targetBill.grandTotal.toFixed(2)}) deleted successfully.`,
+    };
+  };
+
+  // Owner-Only Daily Sales Fetcher
+  const fetchDailySales = async (dateString: string): Promise<DailySalesResponse | null> => {
+    if (!currentUser || currentUser.role !== 'owner') {
+      return null;
+    }
+    const token = authToken || localStorage.getItem(STORAGE_KEYS.AUTH_TOKEN);
+    try {
+      const res = await fetch(`/api/reports/daily-sales?date=${encodeURIComponent(dateString)}`, {
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch (err) {
+      console.error('Error fetching daily sales from server:', err);
+    }
+    return null;
   };
 
   // Settings
@@ -2184,6 +2357,9 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateKOTStatus,
         generateBillForOrder,
         settleBill,
+        deleteBill,
+        fetchDailySales,
+        authToken,
         billToPrint,
         setBillToPrint,
         kotToPrint,

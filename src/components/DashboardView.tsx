@@ -262,25 +262,46 @@ export const DashboardView: React.FC = () => {
 
       {/* 4 Key Metric Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Today's Sales */}
-        <div className="bg-white p-5 rounded-xl border border-neutral-200 shadow-2xs">
-          <div className="flex items-center justify-between text-neutral-500">
-            <span className="text-xs font-medium uppercase tracking-wider">Today&apos;s Sales</span>
-            <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-700 flex items-center justify-center">
-              <IndianRupee className="w-4 h-4" />
+        {/* Today's Sales (Owner Only) / Floor Activity (Staff) */}
+        {isOwner ? (
+          <div className="bg-white p-5 rounded-xl border border-neutral-200 shadow-2xs">
+            <div className="flex items-center justify-between text-neutral-500">
+              <span className="text-xs font-medium uppercase tracking-wider">Today&apos;s Sales</span>
+              <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-700 flex items-center justify-center">
+                <IndianRupee className="w-4 h-4" />
+              </div>
+            </div>
+            <div className="mt-3">
+              <div className="text-2xl font-bold text-neutral-900 font-mono-numbers">
+                ₹{todayTotalSales.toLocaleString('en-IN')}
+              </div>
+              <div className="flex items-center gap-2 text-[11px] text-neutral-500 mt-1">
+                <span>{totalBillsCount} settled bills</span>
+                <span>·</span>
+                <span className="text-emerald-700 font-medium">Avg ₹{Math.round(todayTotalSales / (totalBillsCount || 1))}</span>
+              </div>
             </div>
           </div>
-          <div className="mt-3">
-            <div className="text-2xl font-bold text-neutral-900 font-mono-numbers">
-              ₹{todayTotalSales.toLocaleString('en-IN')}
+        ) : (
+          <div className="bg-white p-5 rounded-xl border border-neutral-200 shadow-2xs">
+            <div className="flex items-center justify-between text-neutral-500">
+              <span className="text-xs font-medium uppercase tracking-wider">Floor Activity</span>
+              <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-700 flex items-center justify-center">
+                <UtensilsCrossed className="w-4 h-4" />
+              </div>
             </div>
-            <div className="flex items-center gap-2 text-[11px] text-neutral-500 mt-1">
-              <span>{totalBillsCount} settled bills</span>
-              <span>·</span>
-              <span className="text-emerald-700 font-medium">Avg ₹{Math.round(todayTotalSales / (totalBillsCount || 1))}</span>
+            <div className="mt-3">
+              <div className="text-2xl font-bold text-neutral-900 font-mono-numbers">
+                {occupiedTablesCount} / {tables.length}
+              </div>
+              <div className="flex items-center gap-2 text-[11px] text-neutral-500 mt-1">
+                <span className="text-emerald-700 font-medium">{occupiedTablesCount} Tables Occupied</span>
+                <span>·</span>
+                <span>{openTablesCount} Available</span>
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
         {/* Orders Today */}
         <div className="bg-white p-5 rounded-xl border border-neutral-200 shadow-2xs">

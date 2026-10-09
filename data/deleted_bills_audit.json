@@ -1,0 +1,21 @@
+[
+  {
+    "action": "BILL_DELETED",
+    "billId": "bill-init-101",
+    "billNumber": "INV-2026-0041",
+    "orderId": "ord-hist-101",
+    "tableId": 2,
+    "grandTotal": 630,
+    "subtotal": 600,
+    "cgstAmount": 15,
+    "sgstAmount": 15,
+    "discountAmount": 0,
+    "paymentMethod": "cash",
+    "itemsCount": 3,
+    "originalPaidAt": "2026-10-09T13:15:00.000Z",
+    "originalCashier": "Amit Kumar",
+    "deletedAt": "2026-10-09T15:15:16.100Z",
+    "deletedByUsername": "admin",
+    "deletedByRole": "owner"
+  }
+]

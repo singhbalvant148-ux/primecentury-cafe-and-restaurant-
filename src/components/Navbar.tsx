@@ -72,7 +72,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenSettings }) => {
       badge: activeKOTCount > 0 ? activeKOTCount : undefined,
     },
     { id: 'billing', label: 'Billing', icon: <Receipt className="w-4 h-4" /> },
-    { id: 'reports', label: 'Reports', icon: <BarChart3 className="w-4 h-4" /> },
+    { id: 'reports', label: 'Daily Sales', icon: <BarChart3 className="w-4 h-4" /> },
     { id: 'users', label: 'Users', icon: <Users className="w-4 h-4" /> },
   ];
 
