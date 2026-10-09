@@ -1,7 +1,21 @@
 import React, { useState } from 'react';
-import { Printer, X, CheckCircle2 } from 'lucide-react';
+import {
+  Printer,
+  X,
+  CheckCircle2,
+  Bluetooth,
+  AlertCircle,
+  RefreshCw,
+  ExternalLink,
+} from 'lucide-react';
 import { Bill } from '../types/pos';
 import { usePOS } from '../context/POSContext';
+import {
+  printBillViaBrowser,
+  openReceiptInNewWindow,
+  buildBillReceiptHtml,
+  isRunningInIframe,
+} from '../utils/printReceipt';
 
 interface ReceiptModalProps {
   bill: Bill;
@@ -9,13 +23,100 @@ interface ReceiptModalProps {
 }
 
 export const ReceiptModal: React.FC<ReceiptModalProps> = ({ bill, onClose }) => {
-  const { settings, tables } = usePOS();
+  const {
+    settings,
+    tables,
+    printerStatus,
+    printerDeviceName,
+    printBillThermal,
+    connectBluetoothPrinter,
+  } = usePOS();
+
   const currentTable = tables.find((t) => t.id === bill.tableId);
   const tableName = currentTable?.name || `Table ${bill.tableId}`;
-  const [receiptWidth, setReceiptWidth] = useState<'80mm' | '58mm'>('80mm');
+  const [receiptWidth, setReceiptWidth] = useState<'80mm' | '58mm'>(
+    settings.printerPaperWidth || '80mm'
+  );
+  const [isPrinting, setIsPrinting] = useState(false);
+  const [printFeedback, setPrintFeedback] = useState<{ success: boolean; msg: string } | null>(null);
 
-  const handlePrint = () => {
-    window.print();
+  const inIframe = isRunningInIframe();
+
+  const handleSystemPrint = async () => {
+    setIsPrinting(true);
+    setPrintFeedback(null);
+    console.info(`[ReceiptModal] Invoking Windows Browser Print for Bill #${bill.billNumber} (${receiptWidth})`);
+
+    try {
+      const res = await printBillViaBrowser(bill, settings, tableName, {
+        paperWidth: receiptWidth,
+        isReprint: Boolean(bill.isPrinted || (bill.printCount && bill.printCount > 1)),
+      });
+      if (res.success) {
+        setPrintFeedback({
+          success: true,
+          msg: inIframe
+            ? `Print command sent for Bill #${bill.billNumber} (${receiptWidth}). If preview iframe suppressed the dialog, use 'Open in New Tab & Print'.`
+            : `Print dialog opened for Bill #${bill.billNumber} (${receiptWidth}). Sent to printer!`,
+        });
+      } else {
+        setPrintFeedback({
+          success: false,
+          msg: res.error || 'Failed to open print dialog. Try again.',
+        });
+      }
+    } catch (err: any) {
+      console.error('[ReceiptModal] Error during system print:', err);
+      window.print();
+    } finally {
+      setIsPrinting(false);
+    }
+  };
+
+  const handlePopoutPrint = () => {
+    console.info(`[ReceiptModal] Opening pop-out print window for Bill #${bill.billNumber}`);
+    const html = buildBillReceiptHtml(bill, settings, tableName, {
+      paperWidth: receiptWidth,
+      isReprint: Boolean(bill.isPrinted || (bill.printCount && bill.printCount > 1)),
+    });
+    const opened = openReceiptInNewWindow(html, `Bill #${bill.billNumber}`);
+    if (opened) {
+      setPrintFeedback({
+        success: true,
+        msg: `Opened Bill #${bill.billNumber} in clean window. Print dialog initiated!`,
+      });
+    } else {
+      setPrintFeedback({
+        success: false,
+        msg: 'Pop-up was blocked. Please allow popups for AI Studio preview or use the Print Receipt button.',
+      });
+    }
+  };
+
+  const handleBluetoothPrint = async () => {
+    setIsPrinting(true);
+    setPrintFeedback(null);
+    try {
+      const res = await printBillThermal(bill, { forceSystemPrint: false });
+      if (res.success) {
+        setPrintFeedback({
+          success: true,
+          msg:
+            res.method === 'bluetooth'
+              ? `Printed via Bluetooth to ${printerDeviceName || 'Printer'}!`
+              : 'Dispatched to Windows Print Manager.',
+        });
+      } else {
+        setPrintFeedback({
+          success: false,
+          msg: res.error || 'Failed to print. Please use System Print dialog.',
+        });
+      }
+    } catch (e: any) {
+      setPrintFeedback({ success: false, msg: e?.message || 'Print transmission error.' });
+    } finally {
+      setIsPrinting(false);
+    }
   };
 
   return (
@@ -94,6 +195,12 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ bill, onClose }) => 
             </div>
           </div>
 
+          {(bill.isPrinted || (bill.printCount && bill.printCount > 1)) && (
+            <div className="py-1 px-2 my-2 text-center bg-neutral-900 text-white font-bold text-[10px] tracking-wider uppercase rounded">
+              *** DUPLICATE / REPRINT RECEIPT ***
+            </div>
+          )}
+
           {/* 2. Bill Meta Information */}
           <div className="py-2.5 border-b border-dashed border-neutral-400 space-y-1 text-[11px]">
             <div className="flex justify-between items-center">
@@ -129,9 +236,14 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ bill, onClose }) => 
             </div>
             <div className="space-y-1.5 pt-0.5">
               {bill.items.map((item) => (
-                <div key={item.id} className="grid grid-cols-12 text-[11px] items-center">
-                  <div className="col-span-6 truncate font-medium text-neutral-900 pr-1">
-                    {item.name}
+                <div key={item.id} className="grid grid-cols-12 text-[11px] items-start">
+                  <div className="col-span-6 font-medium text-neutral-900 pr-1 break-words leading-tight">
+                    <span>{item.name}</span>
+                    {item.notes && (
+                      <div className="text-[9.5px] text-neutral-500 font-normal mt-0.5 break-words">
+                        ({item.notes})
+                      </div>
+                    )}
                   </div>
                   <div className="col-span-2 text-center text-neutral-700">{item.quantity}</div>
                   <div className="col-span-2 text-right text-neutral-700">₹{item.price}</div>
@@ -198,10 +310,17 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ bill, onClose }) => 
 
             <div className="flex justify-between items-center pt-0.5">
               <span className="text-neutral-600">Payment Status:</span>
-              <span className="font-black text-emerald-800 uppercase flex items-center gap-1 text-xs">
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700" />
-                PAID
-              </span>
+              {bill.paymentStatus === 'paid' ? (
+                <span className="font-black text-emerald-800 uppercase flex items-center gap-1 text-xs">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700" />
+                  PAID
+                </span>
+              ) : (
+                <span className="font-black text-amber-800 uppercase flex items-center gap-1 text-xs bg-amber-50 px-2 py-0.5 rounded border border-amber-300">
+                  <AlertCircle className="w-3.5 h-3.5 text-amber-700" />
+                  UNPAID / ESTIMATE
+                </span>
+              )}
             </div>
           </div>
 
@@ -218,20 +337,96 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ bill, onClose }) => 
         </div>
 
         {/* Action Buttons (Hidden during printing) */}
-        <div className="flex items-center gap-3 p-4 bg-neutral-50 border-t border-neutral-200 print:hidden">
-          <button
-            onClick={handlePrint}
-            className="flex-1 inline-flex items-center justify-center gap-2 px-5 py-3 text-xs font-bold text-white bg-neutral-900 hover:bg-neutral-800 rounded-xl transition-colors shadow-sm uppercase tracking-wide"
-          >
-            <Printer className="w-4 h-4 text-emerald-400" />
-            <span>Print Receipt</span>
-          </button>
-          <button
-            onClick={onClose}
-            className="px-4 py-3 text-xs font-medium text-neutral-700 bg-white border border-neutral-300 hover:bg-neutral-100 rounded-xl transition-colors"
-          >
-            Close
-          </button>
+        <div className="p-4 bg-neutral-50 border-t border-neutral-200 print:hidden space-y-2.5">
+          {printFeedback && (
+            <div
+              className={`p-2.5 rounded-lg text-xs flex items-center justify-between gap-2 ${
+                printFeedback.success
+                  ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                  : 'bg-rose-50 text-rose-800 border border-rose-200'
+              }`}
+            >
+              <div className="flex items-center gap-1.5">
+                {printFeedback.success ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                )}
+                <span>{printFeedback.msg}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPrintFeedback(null)}
+                className="text-neutral-400 hover:text-neutral-700 text-xs px-1"
+              >
+                ×
+              </button>
+            </div>
+          )}
+
+          <div className="flex items-center gap-2">
+            {printerStatus === 'connected' ? (
+              <button
+                type="button"
+                disabled={isPrinting}
+                onClick={handleBluetoothPrint}
+                className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl transition-colors shadow-sm uppercase tracking-wide cursor-pointer disabled:opacity-50"
+              >
+                <Bluetooth className="w-4 h-4 text-white" />
+                <span>
+                  {bill.isPrinted || (bill.printCount && bill.printCount > 1) ? 'Reprint' : 'Print'} via Bluetooth ({printerDeviceName || 'Printer'})
+                </span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={connectBluetoothPrinter}
+                className="inline-flex items-center gap-1.5 px-3 py-3 text-xs font-semibold text-neutral-700 bg-white border border-neutral-300 hover:bg-neutral-100 rounded-xl transition-colors cursor-pointer"
+                title="Connect wireless Bluetooth thermal printer"
+              >
+                <Bluetooth className="w-4 h-4 text-blue-600" />
+                <span>Connect BT</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={handleSystemPrint}
+              className={`inline-flex items-center justify-center gap-2 px-4 py-3 text-xs font-bold rounded-xl transition-colors shadow-sm uppercase tracking-wide cursor-pointer ${
+                printerStatus === 'connected'
+                  ? 'text-neutral-700 bg-white border border-neutral-300 hover:bg-neutral-100'
+                  : 'flex-1 text-white bg-neutral-900 hover:bg-neutral-800'
+              }`}
+              title="Print via Windows Print Manager / Driver (Ctrl+P)"
+            >
+              <Printer className="w-4 h-4 text-emerald-500" />
+              <span>
+                {printerStatus === 'connected'
+                  ? 'Driver Dialog'
+                  : bill.isPrinted || (bill.printCount && bill.printCount > 1)
+                  ? 'Reprint Receipt'
+                  : 'Print Receipt'}
+              </span>
+            </button>
+
+            {/* Pop-out Print (guaranteed top-level window print) */}
+            <button
+              type="button"
+              onClick={handlePopoutPrint}
+              className="inline-flex items-center justify-center gap-1.5 px-3 py-3 text-xs font-semibold text-neutral-800 bg-white border border-neutral-300 hover:bg-neutral-100 rounded-xl transition-colors cursor-pointer"
+              title="Open receipt in new tab and print directly (bypasses iframe sandbox)"
+            >
+              <ExternalLink className="w-4 h-4 text-neutral-600" />
+              <span className="hidden sm:inline">New Tab</span>
+            </button>
+
+            <button
+              onClick={onClose}
+              className="px-4 py-3 text-xs font-medium text-neutral-700 bg-white border border-neutral-300 hover:bg-neutral-100 rounded-xl transition-colors cursor-pointer"
+            >
+              Close
+            </button>
+          </div>
         </div>
       </div>
     </div>

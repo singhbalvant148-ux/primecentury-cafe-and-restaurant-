@@ -13,12 +13,19 @@ import {
 } from 'lucide-react';
 import { usePOS } from '../context/POSContext';
 import { KOT, KOTStatus } from '../types/pos';
-import { KOTModal } from './KOTModal';
 
 export const KitchenView: React.FC = () => {
-  const { kots, updateKOTStatus, currentUser, tables } = usePOS();
+  const { kots, updateKOTStatus, currentUser, tables, printKOTThermal } = usePOS();
   const [statusFilter, setStatusFilter] = useState<'all' | 'new' | 'preparing' | 'ready'>('all');
-  const [selectedKotForPrint, setSelectedKotForPrint] = useState<KOT | null>(null);
+
+  const handlePrintKOT = async (kot: KOT) => {
+    console.info(`[KitchenView] Print KOT requested for KOT #${kot.kotNumber} (Order #${kot.orderId})`);
+    try {
+      await printKOTThermal(kot, { isReprint: Boolean(kot.isPrinted) });
+    } catch (err) {
+      console.error('[KitchenView] Error printing KOT:', err);
+    }
+  };
 
   // Filter KOTs
   const activeKOTs = kots.filter((k) => k.status !== 'served');
@@ -157,6 +164,12 @@ export const KitchenView: React.FC = () => {
                       <span className="text-[11px] bg-black/20 px-2 py-0.5 rounded-full font-semibold">
                         {tables.find((t) => t.id === kot.tableId)?.name || `Table ${kot.tableId}`}
                       </span>
+                      {kot.isPrinted && (
+                        <span className="text-[10px] bg-black/30 px-1.5 py-0.5 rounded text-white/90 font-medium flex items-center gap-0.5" title={`Printed ${kot.printCount || 1} time(s)`}>
+                          <Printer className="w-2.5 h-2.5" />
+                          <span>Printed</span>
+                        </span>
+                      )}
                     </div>
                     <div className="text-[10px] opacity-90 mt-0.5 flex items-center gap-2">
                       <span className="flex items-center gap-1">
@@ -170,7 +183,7 @@ export const KitchenView: React.FC = () => {
 
                   {/* Print KOT */}
                   <button
-                    onClick={() => setSelectedKotForPrint(kot)}
+                    onClick={() => handlePrintKOT(kot)}
                     className="p-1.5 rounded-md hover:bg-black/20 transition-colors text-white"
                     title="Print KOT Slip"
                   >
@@ -215,12 +228,12 @@ export const KitchenView: React.FC = () => {
                 <div className="p-3 bg-neutral-50 border-t border-neutral-200 flex flex-wrap items-center justify-between gap-2">
                   <button
                     type="button"
-                    onClick={() => setSelectedKotForPrint(kot)}
+                    onClick={() => handlePrintKOT(kot)}
                     className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-bold text-neutral-800 bg-white hover:bg-neutral-100 border border-neutral-300 rounded-lg shadow-2xs transition-colors cursor-pointer"
-                    title="Print KOT Slip"
+                    title={kot.isPrinted ? 'Reprint KOT Ticket' : 'Print KOT Ticket'}
                   >
                     <Printer className="w-3.5 h-3.5 text-neutral-700" />
-                    <span>Print KOT</span>
+                    <span>{kot.isPrinted ? 'Reprint KOT' : 'Print KOT'}</span>
                   </button>
 
                   <div className="flex items-center gap-1.5 ml-auto">
@@ -259,11 +272,6 @@ export const KitchenView: React.FC = () => {
             );
           })}
         </div>
-      )}
-
-      {/* KOT Print Preview Modal */}
-      {selectedKotForPrint && (
-        <KOTModal kot={selectedKotForPrint} onClose={() => setSelectedKotForPrint(null)} />
       )}
     </div>
   );

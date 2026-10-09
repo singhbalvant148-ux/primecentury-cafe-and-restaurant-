@@ -641,12 +641,12 @@ export const DashboardView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-100">
-                {recentOrders.map((ord) => {
+                {recentOrders.map((ord, idx) => {
                   const itemsCount = ord.items.reduce((s, it) => s + it.quantity, 0);
                   const total = ord.items.reduce((s, it) => s + it.price * it.quantity, 0);
 
                   return (
-                    <tr key={ord.id} className="hover:bg-neutral-50/70 transition-colors">
+                    <tr key={`${ord.id}-${idx}`} className="hover:bg-neutral-50/70 transition-colors">
                       <td className="py-2.5 font-semibold text-neutral-900 font-mono-numbers">
                         #{ord.orderNumber}
                       </td>

@@ -1,8 +1,9 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import {
   User,
   UserRole,
   Table,
+  TableStatus,
   MenuItem,
   Order,
   OrderItem,
@@ -13,6 +14,9 @@ import {
   PaymentMethod,
   RestaurantSettings,
   Subcategory,
+  PrinterPaperWidth,
+  PrinterMode,
+  PrinterStatus,
 } from '../types/pos';
 import {
   INITIAL_USERS,
@@ -24,6 +28,20 @@ import {
   INITIAL_BILLS,
 } from '../data/initialData';
 import { hashPassword, verifyPassword } from '../utils/security';
+import { bluetoothPrinter } from '../utils/bluetoothPrinter';
+import {
+  generateBillReceiptBytes,
+  generateKOTReceiptBytes,
+  generateDiagnosticTestReceipt,
+  generateSampleBillBytes,
+  generateSampleKOTBytes,
+} from '../utils/escpos';
+import {
+  printBillViaBrowser,
+  printKOTViaBrowser,
+  printSampleBillViaBrowser,
+  printSampleKOTViaBrowser,
+} from '../utils/printReceipt';
 
 export type AppView =
   | 'dashboard'
@@ -71,6 +89,7 @@ interface POSContextType {
     capacity?: number;
     section?: 'Main Hall' | 'Garden Terrace' | 'Family AC' | string;
   }) => { success: boolean; message?: string; table?: Table };
+  makeTableUnoccupied: (tableId: number) => boolean;
   menuItems: MenuItem[];
   orders: Order[];
   kots: KOT[];
@@ -94,17 +113,34 @@ interface POSContextType {
     discountValue: number
   ) => Bill;
   settleBill: (
-    billId: string,
-    paymentMethod: PaymentMethod,
+    billIdOrBill: string | Bill,
+    paymentMethod?: PaymentMethod,
     cashReceived?: number,
     changeGiven?: number
   ) => boolean;
   
-  // Receipts
+  // Receipts & Thermal Printing
   billToPrint: Bill | null;
   setBillToPrint: (bill: Bill | null) => void;
   kotToPrint: KOT | null;
   setKotToPrint: (kot: KOT | null) => void;
+  printerStatus: PrinterStatus;
+  printerDeviceName: string | null;
+  printerError: string | null;
+  connectBluetoothPrinter: () => Promise<{ success: boolean; deviceName?: string; error?: string }>;
+  disconnectBluetoothPrinter: () => void;
+  reconnectBluetoothPrinter: () => Promise<{ success: boolean; deviceName?: string; error?: string }>;
+  printBillThermal: (
+    bill: Bill,
+    options?: { forceSystemPrint?: boolean }
+  ) => Promise<{ success: boolean; method: 'bluetooth' | 'system'; error?: string }>;
+  printKOTThermal: (
+    kot: KOT,
+    options?: { forceSystemPrint?: boolean; isReprint?: boolean }
+  ) => Promise<{ success: boolean; method: 'bluetooth' | 'system'; error?: string }>;
+  testPrintThermal: (
+    type: 'diagnostic' | 'bill' | 'kot'
+  ) => Promise<{ success: boolean; method: 'bluetooth' | 'system'; error?: string }>;
 
   // Settings & Admin
   updateSettings: (newSettings: Partial<RestaurantSettings>) => void;
@@ -261,6 +297,24 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [activeTableId, setActiveTableId] = useState<number | null>(1);
   const [billToPrint, setBillToPrint] = useState<Bill | null>(null);
   const [kotToPrint, setKotToPrint] = useState<KOT | null>(null);
+
+  // Bluetooth Thermal Printer state
+  const [printerStatus, setPrinterStatus] = useState<PrinterStatus>(bluetoothPrinter.getStatus());
+  const [printerDeviceName, setPrinterDeviceName] = useState<string | null>(bluetoothPrinter.getDeviceName());
+  const [printerError, setPrinterError] = useState<string | null>(bluetoothPrinter.getLastError());
+
+  // Listen to Bluetooth printer status updates
+  useEffect(() => {
+    const unsubscribe = bluetoothPrinter.subscribe((status, name, error) => {
+      setPrinterStatus(status);
+      setPrinterDeviceName(name);
+      setPrinterError(error || null);
+    });
+    return unsubscribe;
+  }, []);
+
+  // Synchronous cache for newly generated bills prior to state re-renders
+  const pendingBillsRef = useRef<Map<string, Bill>>(new Map());
 
   // Tables (starts with 12 available tables, expandable by Owner)
   const [tables, setTables] = useState<Table[]>(() => {
@@ -451,10 +505,18 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const saved = localStorage.getItem(STORAGE_KEYS.ORDERS);
       if (saved) {
         const parsed: Order[] = JSON.parse(saved);
-        return parsed.map((ord) => ({
-          ...ord,
-          items: ord.items.filter((it) => it.isVeg && !it.name.toLowerCase().includes('chicken')),
-        }));
+        const seenIds = new Set<string>();
+        const uniqueOrders: Order[] = [];
+        for (const ord of parsed) {
+          if (ord && ord.id && !seenIds.has(ord.id)) {
+            seenIds.add(ord.id);
+            uniqueOrders.push({
+              ...ord,
+              items: (ord.items || []).filter((it) => it.isVeg && !it.name.toLowerCase().includes('chicken')),
+            });
+          }
+        }
+        return uniqueOrders;
       }
     } catch (e) {
       console.error(e);
@@ -537,7 +599,13 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [subcategories]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
+    const seenIds = new Set<string>();
+    const uniqueOrders = orders.filter((o) => {
+      if (!o || !o.id || seenIds.has(o.id)) return false;
+      seenIds.add(o.id);
+      return true;
+    });
+    localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(uniqueOrders));
   }, [orders]);
 
   useEffect(() => {
@@ -551,6 +619,29 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(settings));
   }, [settings]);
+
+  // Reconcile and self-heal tables: ensure any table linked to a paid or missing order is marked available
+  useEffect(() => {
+    setTables((prevTables) => {
+      let changed = false;
+      const reconciled = prevTables.map((t) => {
+        if (t.activeOrderId) {
+          const linkedOrder = orders.find((o) => o.id === t.activeOrderId);
+          if (!linkedOrder || linkedOrder.status === 'paid') {
+            changed = true;
+            return {
+              ...t,
+              status: 'available' as TableStatus,
+              activeOrderId: undefined,
+              occupiedSince: undefined,
+            };
+          }
+        }
+        return t;
+      });
+      return changed ? reconciled : prevTables;
+    });
+  }, [orders]);
 
   // Migration effect: ensure any items or categories under 'North Indian Zayka' are renamed to 'Paneer Main Course' under 'Main Course & Gravies'
   useEffect(() => {
@@ -917,13 +1008,56 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
+  // Make a table unoccupied / available manually without billing (cancels & clears active unsaved order)
+  const makeTableUnoccupied = (tableId: number): boolean => {
+    const table = tables.find((t) => t.id === tableId);
+    if (!table) return false;
+
+    const targetOrderId = table.activeOrderId;
+
+    // 1. Clear any active/unsaved orders for this table without adding to sales history
+    setOrders((prev) => {
+      const updated = prev.filter(
+        (o) => !(o.tableId === tableId && o.status !== 'paid') && (!targetOrderId || o.id !== targetOrderId)
+      );
+      try {
+        localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(updated));
+      } catch (e) {
+        console.error(e);
+      }
+      return updated;
+    });
+
+    // 2. Immediately mark table as available and clear occupied flags
+    setTables((prev) => {
+      const updated = prev.map((t) =>
+        t.id === tableId
+          ? {
+              ...t,
+              status: 'available' as TableStatus,
+              activeOrderId: undefined,
+              occupiedSince: undefined,
+            }
+          : t
+      );
+      try {
+        localStorage.setItem(STORAGE_KEYS.TABLES, JSON.stringify(updated));
+      } catch (e) {
+        console.error(e);
+      }
+      return updated;
+    });
+
+    return true;
+  };
+
   // Create or retrieve active order for table
   const createOrGetOrderForTable = (tableId: number): Order => {
     const existing = orders.find((o) => o.tableId === tableId && o.status === 'active');
     if (existing) return existing;
 
-    const newOrderNumber =
-      orders.length > 0 ? Math.max(...orders.map((o) => o.orderNumber)) + 1 : 1001;
+    const maxOrderNum = orders.reduce((max, o) => Math.max(max, o.orderNumber || 0), 1000);
+    const newOrderNumber = maxOrderNum + 1;
     const newOrder: Order = {
       id: `ORD-${newOrderNumber}`,
       orderNumber: newOrderNumber,
@@ -934,7 +1068,11 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       items: [],
     };
 
-    setOrders((prev) => [newOrder, ...prev]);
+    setOrders((prev) => {
+      const existingInPrev = prev.find((o) => o.tableId === tableId && o.status === 'active');
+      if (existingInPrev) return prev;
+      return [newOrder, ...prev.filter((o) => o.id !== newOrder.id)];
+    });
 
     // Update table status to occupied
     setTables((prev) =>
@@ -942,9 +1080,9 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         t.id === tableId
           ? {
               ...t,
-              status: 'occupied',
+              status: t.status === 'billed' ? 'billed' : 'occupied',
               activeOrderId: newOrder.id,
-              occupiedSince: new Date().toISOString(),
+              occupiedSince: t.occupiedSince || new Date().toISOString(),
             }
           : t
       )
@@ -960,37 +1098,46 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       targetOrder = createOrGetOrderForTable(tableId);
     }
 
-    setOrders((prevOrders) =>
-      prevOrders.map((ord) => {
-        if (ord.id !== targetOrder!.id) return ord;
+    setOrders((prevOrders) => {
+      let ordToUpdate = prevOrders.find((o) => o.tableId === tableId && o.status === 'active');
+      let isNew = false;
+      if (!ordToUpdate) {
+        ordToUpdate = targetOrder!;
+        isNew = true;
+      }
 
-        // Check if item with same ID and notes already exists
-        const existingItemIndex = ord.items.findIndex(
-          (i) => i.menuItemId === menuItem.id && (i.notes || '') === (notes || '')
+      // Check if item with same ID and notes already exists
+      const existingItemIndex = ordToUpdate.items.findIndex(
+        (i) => i.menuItemId === menuItem.id && (i.notes || '') === (notes || '')
+      );
+
+      let updatedItems: OrderItem[];
+      if (existingItemIndex >= 0) {
+        updatedItems = ordToUpdate.items.map((item, idx) =>
+          idx === existingItemIndex ? { ...item, quantity: item.quantity + 1 } : item
         );
+      } else {
+        const newItem: OrderItem = {
+          id: `oi-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+          menuItemId: menuItem.id,
+          name: menuItem.name,
+          price: menuItem.price,
+          quantity: 1,
+          isVeg: menuItem.isVeg ?? true,
+          notes: notes?.trim() || undefined,
+          kotSentQuantity: 0,
+        };
+        updatedItems = [...ordToUpdate.items, newItem];
+      }
 
-        let updatedItems: OrderItem[];
-        if (existingItemIndex >= 0) {
-          updatedItems = ord.items.map((item, idx) =>
-            idx === existingItemIndex ? { ...item, quantity: item.quantity + 1 } : item
-          );
-        } else {
-          const newItem: OrderItem = {
-            id: `oi-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-            menuItemId: menuItem.id,
-            name: menuItem.name,
-            price: menuItem.price,
-            quantity: 1,
-            isVeg: menuItem.isVeg ?? true,
-            notes: notes?.trim() || undefined,
-            kotSentQuantity: 0,
-          };
-          updatedItems = [...ord.items, newItem];
-        }
+      const updated = { ...ordToUpdate, items: updatedItems };
 
-        return { ...ord, items: updatedItems };
-      })
-    );
+      if (isNew) {
+        return [updated, ...prevOrders.filter((o) => o.id !== updated.id)];
+      }
+
+      return prevOrders.map((ord) => (ord.id === updated.id ? updated : ord));
+    });
 
     // Ensure table is occupied
     setTables((prev) =>
@@ -999,7 +1146,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? {
               ...t,
               status: t.status === 'billed' ? 'billed' : 'occupied',
-              activeOrderId: targetOrder!.id,
+              activeOrderId: targetOrder.id,
               occupiedSince: t.occupiedSince || new Date().toISOString(),
             }
           : t
@@ -1130,7 +1277,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const billNumber = `INV-${new Date().getFullYear()}-${String(bills.length + 41).padStart(4, '0')}`;
 
     const newBill: Bill = {
-      id: `bill-${Date.now()}`,
+      id: `bill-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       billNumber,
       orderId: order.id,
       tableId: order.tableId,
@@ -1150,51 +1297,179 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       cashierName: currentUser?.name || 'Cashier',
     };
 
+    // Cache synchronously in ref so settleBill can immediately look it up
+    pendingBillsRef.current.set(newBill.id, newBill);
+
     return newBill;
   };
 
-  // Settle Bill
+  // Settle Bill: Record transaction in Sales History, mark order as paid, and immediately free the table
   const settleBill = (
-    billId: string,
-    paymentMethod: PaymentMethod,
+    billIdOrBill: string | Bill,
+    paymentMethod: PaymentMethod = 'cash',
     cashReceived?: number,
     changeGiven?: number
   ): boolean => {
-    const existing = bills.find((b) => b.id === billId);
-    let targetBill: Bill;
+    let targetBill: Bill | undefined;
 
-    if (existing) {
+    if (typeof billIdOrBill === 'object' && billIdOrBill !== null) {
       targetBill = {
-        ...existing,
-        paymentMethod,
-        cashReceived,
-        changeGiven,
+        ...billIdOrBill,
+        paymentMethod: paymentMethod || billIdOrBill.paymentMethod || 'cash',
+        paymentStatus: 'paid',
+        cashReceived: cashReceived !== undefined ? cashReceived : billIdOrBill.cashReceived,
+        changeGiven: changeGiven !== undefined ? changeGiven : billIdOrBill.changeGiven,
         paidAt: new Date().toISOString(),
-        cashierName: currentUser?.name || existing.cashierName,
+        cashierName: currentUser?.name || billIdOrBill.cashierName || 'Cashier',
       };
-      setBills((prev) => prev.map((b) => (b.id === billId ? targetBill : b)));
     } else {
+      const billId = String(billIdOrBill);
+      const existing = bills.find((b) => b.id === billId) || pendingBillsRef.current.get(billId);
+
+      if (existing) {
+        targetBill = {
+          ...existing,
+          paymentMethod: paymentMethod || existing.paymentMethod || 'cash',
+          paymentStatus: 'paid',
+          cashReceived: cashReceived !== undefined ? cashReceived : existing.cashReceived,
+          changeGiven: changeGiven !== undefined ? changeGiven : existing.changeGiven,
+          paidAt: new Date().toISOString(),
+          cashierName: currentUser?.name || existing.cashierName || 'Cashier',
+        };
+      } else {
+        // Fallback: check if billId is an orderId
+        const linkedOrder = orders.find((o) => o.id === billId);
+        if (linkedOrder) {
+          const subtotal = linkedOrder.items.reduce((sum, it) => sum + it.price * it.quantity, 0);
+          const cgstAmount = Math.round(((subtotal * settings.cgstRate) / 100) * 100) / 100;
+          const sgstAmount = Math.round(((subtotal * settings.sgstRate) / 100) * 100) / 100;
+          const grandTotal = Math.round(subtotal + cgstAmount + sgstAmount);
+          targetBill = {
+            id: `bill-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            billNumber: `INV-${new Date().getFullYear()}-${String(bills.length + 41).padStart(4, '0')}`,
+            orderId: linkedOrder.id,
+            tableId: linkedOrder.tableId,
+            items: [...linkedOrder.items],
+            subtotal,
+            discountType: 'percentage',
+            discountValue: 0,
+            discountAmount: 0,
+            cgstRate: settings.cgstRate,
+            sgstRate: settings.sgstRate,
+            cgstAmount,
+            sgstAmount,
+            grandTotal,
+            paymentMethod: paymentMethod || 'cash',
+            paymentStatus: 'paid',
+            paidAt: new Date().toISOString(),
+            cashierName: currentUser?.name || 'Cashier',
+            cashReceived,
+            changeGiven,
+          };
+        } else {
+          // Fallback: check if billId is a tableId
+          const tableNum = Number(billId);
+          if (!isNaN(tableNum)) {
+            const table = tables.find((t) => t.id === tableNum);
+            const orderForTable = orders.find(
+              (o) => o.id === table?.activeOrderId || (o.tableId === tableNum && o.status !== 'paid')
+            );
+            if (orderForTable) {
+              const subtotal = orderForTable.items.reduce((sum, it) => sum + it.price * it.quantity, 0);
+              const cgstAmount = Math.round(((subtotal * settings.cgstRate) / 100) * 100) / 100;
+              const sgstAmount = Math.round(((subtotal * settings.sgstRate) / 100) * 100) / 100;
+              const grandTotal = Math.round(subtotal + cgstAmount + sgstAmount);
+              targetBill = {
+                id: `bill-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+                billNumber: `INV-${new Date().getFullYear()}-${String(bills.length + 41).padStart(4, '0')}`,
+                orderId: orderForTable.id,
+                tableId: orderForTable.tableId,
+                items: [...orderForTable.items],
+                subtotal,
+                discountType: 'percentage',
+                discountValue: 0,
+                discountAmount: 0,
+                cgstRate: settings.cgstRate,
+                sgstRate: settings.sgstRate,
+                cgstAmount,
+                sgstAmount,
+                grandTotal,
+                paymentMethod: paymentMethod || 'cash',
+                paymentStatus: 'paid',
+                paidAt: new Date().toISOString(),
+                cashierName: currentUser?.name || 'Cashier',
+                cashReceived,
+                changeGiven,
+              };
+            }
+          }
+        }
+      }
+    }
+
+    if (!targetBill) {
       return false;
     }
 
-    // Mark Order as paid
-    setOrders((prev) =>
-      prev.map((o) => (o.id === targetBill.orderId ? { ...o, status: 'paid' } : o))
-    );
+    const finalBill = targetBill;
 
-    // Free the table
-    setTables((prev) =>
-      prev.map((t) =>
-        t.id === targetBill.tableId
-          ? {
-              ...t,
-              status: 'available',
-              activeOrderId: undefined,
-              occupiedSince: undefined,
-            }
-          : t
-      )
-    );
+    // 1. Record completed transaction in Bills (Sales History & Daily Ledger)
+    setBills((prev) => {
+      const idx = prev.findIndex((b) => b.id === finalBill.id);
+      let updated: Bill[];
+      if (idx >= 0) {
+        updated = [...prev];
+        updated[idx] = finalBill;
+      } else {
+        updated = [finalBill, ...prev];
+      }
+      try {
+        localStorage.setItem(STORAGE_KEYS.BILLS, JSON.stringify(updated));
+      } catch (e) {
+        console.error(e);
+      }
+      return updated;
+    });
+
+    // 2. Mark the order as paid (retains in Sales History & Orders Management, but clears active status)
+    setOrders((prev) => {
+      const updated = prev.map((o) => {
+        if (o.id === finalBill.orderId || (o.tableId === finalBill.tableId && o.status !== 'paid')) {
+          return {
+            ...o,
+            status: 'paid' as const,
+          };
+        }
+        return o;
+      });
+      try {
+        localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(updated));
+      } catch (e) {
+        console.error(e);
+      }
+      return updated;
+    });
+
+    // 3. Immediately mark that table as EMPTY / AVAILABLE and clear active order references
+    setTables((prev) => {
+      const updated = prev.map((t) => {
+        if (t.id === finalBill.tableId || t.activeOrderId === finalBill.orderId) {
+          return {
+            ...t,
+            status: 'available' as TableStatus,
+            activeOrderId: undefined,
+            occupiedSince: undefined,
+          };
+        }
+        return t;
+      });
+      try {
+        localStorage.setItem(STORAGE_KEYS.TABLES, JSON.stringify(updated));
+      } catch (e) {
+        console.error(e);
+      }
+      return updated;
+    });
 
     return true;
   };
@@ -1202,6 +1477,231 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Settings
   const updateSettings = (newSettings: Partial<RestaurantSettings>) => {
     setSettings((prev) => ({ ...prev, ...newSettings }));
+  };
+
+  // Bluetooth Thermal Printer Methods
+  const connectBluetoothPrinter = async () => {
+    const res = await bluetoothPrinter.connect();
+    if (res.success && res.deviceName) {
+      updateSettings({ savedBluetoothDeviceName: res.deviceName });
+    }
+    return res;
+  };
+
+  const disconnectBluetoothPrinter = () => {
+    bluetoothPrinter.disconnect();
+  };
+
+  const reconnectBluetoothPrinter = async () => {
+    return bluetoothPrinter.reconnect();
+  };
+
+  const printBillThermal = async (
+    bill: Bill,
+    options?: { forceSystemPrint?: boolean }
+  ): Promise<{ success: boolean; method: 'bluetooth' | 'system'; error?: string }> => {
+    const isDirectBt =
+      !options?.forceSystemPrint &&
+      (settings.printerMode === 'bluetooth' ||
+        (settings.printerMode !== 'system' && bluetoothPrinter.getStatus() === 'connected'));
+
+    // Record print status in bills ledger
+    setBills((prev) => {
+      const updated = prev.map((b) =>
+        b.id === bill.id
+          ? {
+              ...b,
+              isPrinted: true,
+              printedAt: new Date().toISOString(),
+              printCount: (b.printCount || 0) + 1,
+            }
+          : b
+      );
+      try {
+        localStorage.setItem(STORAGE_KEYS.BILLS, JSON.stringify(updated));
+      } catch (e) {
+        console.error(e);
+      }
+      return updated;
+    });
+
+    if (isDirectBt) {
+      if (bluetoothPrinter.getStatus() !== 'connected') {
+        return {
+          success: false,
+          method: 'bluetooth',
+          error: 'Bluetooth printer is disconnected. Please connect printer or use System Print.',
+        };
+      }
+
+      const bytes = generateBillReceiptBytes(
+        bill,
+        settings,
+        settings.printerPaperWidth || '80mm',
+        Boolean(bill.isPrinted)
+      );
+
+      const res = await bluetoothPrinter.printBytes(bytes);
+      if (!res.success) {
+        return { success: false, method: 'bluetooth', error: res.error };
+      }
+      return { success: true, method: 'bluetooth' };
+    }
+
+    // System Print (dispatches browser print for wired USB/Windows printer and opens preview)
+    const currentTable = tables.find((t) => t.id === bill.tableId);
+    const tableName = currentTable?.name || `Table #${bill.tableId}`;
+    setBillToPrint(bill);
+    const browserRes = await printBillViaBrowser(bill, settings, tableName, {
+      paperWidth: settings.printerPaperWidth || '80mm',
+      isReprint: Boolean(bill.isPrinted || (bill.printCount && bill.printCount > 1)),
+    });
+    return { success: browserRes.success, method: 'system', error: browserRes.error };
+  };
+
+  const printKOTThermal = async (
+    kot: KOT,
+    options?: { forceSystemPrint?: boolean; isReprint?: boolean }
+  ): Promise<{ success: boolean; method: 'bluetooth' | 'system'; error?: string }> => {
+    const currentTable = tables.find((t) => t.id === kot.tableId);
+    const tableName = currentTable?.name || `Table #${kot.tableId}`;
+
+    const isDirectBt =
+      !options?.forceSystemPrint &&
+      (settings.printerMode === 'bluetooth' ||
+        (settings.printerMode !== 'system' && bluetoothPrinter.getStatus() === 'connected'));
+
+    // Update KOT print tracking to prevent accidental duplicates
+    setKots((prev) => {
+      const updated = prev.map((k) =>
+        k.id === kot.id
+          ? {
+              ...k,
+              isPrinted: true,
+              printedAt: new Date().toISOString(),
+              printCount: (k.printCount || 0) + 1,
+            }
+          : k
+      );
+      try {
+        localStorage.setItem(STORAGE_KEYS.KOTS, JSON.stringify(updated));
+      } catch (e) {
+        console.error(e);
+      }
+      return updated;
+    });
+
+    if (isDirectBt) {
+      if (bluetoothPrinter.getStatus() !== 'connected') {
+        return {
+          success: false,
+          method: 'bluetooth',
+          error: 'Bluetooth printer is disconnected. Please connect printer or use System Print.',
+        };
+      }
+
+      const bytes = generateKOTReceiptBytes(
+        kot,
+        settings,
+        tableName,
+        settings.printerPaperWidth || '80mm',
+        options?.isReprint || Boolean(kot.isPrinted)
+      );
+
+      const res = await bluetoothPrinter.printBytes(bytes);
+      if (!res.success) {
+        return { success: false, method: 'bluetooth', error: res.error };
+      }
+      return { success: true, method: 'bluetooth' };
+    }
+
+    // System Print (dispatches browser print for wired USB/Windows printer and opens preview)
+    setKotToPrint(kot);
+    const browserRes = await printKOTViaBrowser(kot, settings, tableName, {
+      paperWidth: settings.printerPaperWidth || '80mm',
+      isReprint: options?.isReprint || Boolean(kot.isPrinted),
+    });
+    return { success: browserRes.success, method: 'system', error: browserRes.error };
+  };
+
+  const testPrintThermal = async (
+    type: 'diagnostic' | 'bill' | 'kot'
+  ): Promise<{ success: boolean; method: 'bluetooth' | 'system'; error?: string }> => {
+    const isDirectBt =
+      settings.printerMode === 'bluetooth' ||
+      (settings.printerMode !== 'system' && bluetoothPrinter.getStatus() === 'connected');
+
+    if (isDirectBt) {
+      if (bluetoothPrinter.getStatus() !== 'connected') {
+        return {
+          success: false,
+          method: 'bluetooth',
+          error: 'Bluetooth printer is not connected. Click "Connect Bluetooth Printer" first.',
+        };
+      }
+
+      let bytes: Uint8Array;
+      if (type === 'diagnostic') {
+        bytes = generateDiagnosticTestReceipt(
+          settings,
+          settings.printerPaperWidth || '80mm',
+          `Web Bluetooth (BLE) [${bluetoothPrinter.getDeviceName() || 'Thermal Printer'}]`
+        );
+      } else if (type === 'bill') {
+        bytes = generateSampleBillBytes(settings, settings.printerPaperWidth || '80mm');
+      } else {
+        bytes = generateSampleKOTBytes(settings, settings.printerPaperWidth || '80mm');
+      }
+
+      const res = await bluetoothPrinter.printBytes(bytes);
+      if (!res.success) {
+        return { success: false, method: 'bluetooth', error: res.error };
+      }
+      return { success: true, method: 'bluetooth' };
+    }
+
+    // For system print test (browser print to USB or default printer without altering real business data)
+    if (type === 'bill') {
+      const res = await printSampleBillViaBrowser(settings, {
+        paperWidth: settings.printerPaperWidth || '80mm',
+      });
+      return { success: res.success, method: 'system', error: res.error };
+    } else if (type === 'kot') {
+      const res = await printSampleKOTViaBrowser(settings, {
+        paperWidth: settings.printerPaperWidth || '80mm',
+      });
+      return { success: res.success, method: 'system', error: res.error };
+    } else {
+      // Diagnostic test receipt via browser print
+      const sampleBill: Bill = {
+        id: `test-diag-${Date.now()}`,
+        billNumber: 'TEST-DIAGNOSTIC',
+        orderId: 'ORD-DIAG',
+        tableId: 0,
+        items: [
+          { id: 'd1', menuItemId: 'd1', name: 'Windows Thermal Driver Alignment Test', price: 0, quantity: 1, isVeg: true, kotSentQuantity: 1 },
+          { id: 'd2', menuItemId: 'd2', name: 'Thermal Font Test 58mm/80mm 123', price: 0, quantity: 1, isVeg: true, kotSentQuantity: 1 },
+        ],
+        subtotal: 0,
+        discountType: 'flat',
+        discountValue: 0,
+        discountAmount: 0,
+        cgstRate: 0,
+        sgstRate: 0,
+        cgstAmount: 0,
+        sgstAmount: 0,
+        grandTotal: 0,
+        paymentMethod: 'cash',
+        paymentStatus: 'paid',
+        paidAt: new Date().toISOString(),
+        cashierName: 'Diagnostic Check',
+        isPrinted: true,
+      };
+      const res = await printBillViaBrowser(sampleBill, settings, 'Test Station', {
+        paperWidth: settings.printerPaperWidth || '80mm',
+      });
+      return { success: res.success, method: 'system', error: res.error };
+    }
   };
 
   // Menu items management (ONLY Owner can modify menu items, prices, and categories)
@@ -1659,6 +2159,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         deleteUser,
         tables,
         addTable,
+        makeTableUnoccupied,
         menuItems,
         categories,
         subcategories,
@@ -1687,6 +2188,15 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setBillToPrint,
         kotToPrint,
         setKotToPrint,
+        printerStatus,
+        printerDeviceName,
+        printerError,
+        connectBluetoothPrinter,
+        disconnectBluetoothPrinter,
+        reconnectBluetoothPrinter,
+        printBillThermal,
+        printKOTThermal,
+        testPrintThermal,
         updateSettings,
         toggleMenuItemAvailability,
         addMenuItem,

@@ -102,6 +102,9 @@ export interface KOT {
   items: KOTItem[];
   status: KOTStatus;
   createdAt: string;
+  isPrinted?: boolean;
+  printedAt?: string;
+  printCount?: number;
 }
 
 export type PaymentMethod = 'cash' | 'upi' | 'card';
@@ -122,12 +125,19 @@ export interface Bill {
   sgstAmount: number;
   grandTotal: number;
   paymentMethod: PaymentMethod;
-  paymentStatus: 'paid';
+  paymentStatus: 'paid' | 'unpaid';
   paidAt: string;
   cashierName: string;
   cashReceived?: number;
   changeGiven?: number;
+  isPrinted?: boolean;
+  printedAt?: string;
+  printCount?: number;
 }
+
+export type PrinterPaperWidth = '58mm' | '80mm';
+export type PrinterMode = 'bluetooth' | 'system' | 'auto';
+export type PrinterStatus = 'connected' | 'disconnected' | 'connecting' | 'error';
 
 export interface RestaurantSettings {
   name: string;
@@ -139,4 +149,7 @@ export interface RestaurantSettings {
   cgstRate: number; // e.g. 2.5 for 2.5%
   sgstRate: number; // e.g. 2.5 for 2.5%
   upiId: string;
+  printerPaperWidth?: PrinterPaperWidth;
+  printerMode?: PrinterMode;
+  savedBluetoothDeviceName?: string;
 }

@@ -60,6 +60,8 @@ export const INITIAL_SETTINGS: RestaurantSettings = {
   cgstRate: 2.5,
   sgstRate: 2.5,
   upiId: 'primecentury@upi',
+  printerPaperWidth: '80mm',
+  printerMode: 'auto',
 };
 
 export const INITIAL_TABLES: Table[] = [

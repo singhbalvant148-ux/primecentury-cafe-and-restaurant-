@@ -29,6 +29,7 @@ export const BillingView: React.FC = () => {
     generateBillForOrder,
     settleBill,
     currentUser,
+    printBillThermal,
   } = usePOS();
 
   // Find tables with active or billed orders
@@ -55,12 +56,13 @@ export const BillingView: React.FC = () => {
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
   const [cashTendered, setCashTendered] = useState<string>('');
   const [settledBill, setSettledBill] = useState<Bill | null>(null);
-  const [printBillPreview, setPrintBillPreview] = useState<Bill | null>(null);
   const [isEditingTax, setIsEditingTax] = useState<boolean>(false);
+  const [billingError, setBillingError] = useState<string | null>(null);
 
   // Direct Print Bill handler
-  const handlePrintBill = () => {
+  const handlePrintBill = async () => {
     if (!selectedOrder) return;
+    console.info(`[BillingView] PRINT BILL requested for order #${selectedOrder.orderNumber} (Table ${selectedTableId})`);
 
     // Create current thermal bill preview for 58mm/80mm printing
     const previewBill: Bill = {
@@ -79,14 +81,18 @@ export const BillingView: React.FC = () => {
       sgstAmount,
       grandTotal,
       paymentMethod,
-      paymentStatus: 'paid',
+      paymentStatus: 'unpaid',
       paidAt: new Date().toISOString(),
       cashierName: currentUser?.name || 'Cashier',
       cashReceived: paymentMethod === 'cash' ? cashNum : undefined,
       changeGiven: paymentMethod === 'cash' ? changeToReturn : undefined,
     };
 
-    setPrintBillPreview(previewBill);
+    try {
+      await printBillThermal(previewBill);
+    } catch (err) {
+      console.error('[BillingView] Error invoking bill print:', err);
+    }
   };
 
   // Subtotal calculation
@@ -111,7 +117,16 @@ export const BillingView: React.FC = () => {
   const changeToReturn = Math.max(0, cashNum - grandTotal);
 
   const handleSettleAndPrint = () => {
+    setBillingError(null);
     if (!selectedOrder) return;
+
+    // Validate cash received if cash payment method
+    if (paymentMethod === 'cash' && cashTendered.trim() !== '' && cashNum < grandTotal) {
+      setBillingError(
+        `Cash received (₹${cashNum.toFixed(2)}) is less than total bill (₹${grandTotal.toFixed(2)}). Please collect full amount before settling.`
+      );
+      return;
+    }
 
     // Temporarily update settings rates if edited
     if (customCgstRate !== settings.cgstRate || customSgstRate !== settings.sgstRate) {
@@ -119,20 +134,42 @@ export const BillingView: React.FC = () => {
     }
 
     const newBill = generateBillForOrder(selectedOrder.id, discountType, discountValue);
-    settleBill(
-      newBill.id,
+
+    const effectiveCashReceived =
+      paymentMethod === 'cash' ? (cashNum > 0 ? cashNum : grandTotal) : undefined;
+    const effectiveChangeGiven =
+      paymentMethod === 'cash' ? Math.max(0, (effectiveCashReceived || 0) - grandTotal) : undefined;
+
+    const finalBill: Bill = {
+      ...newBill,
+      cgstRate: customCgstRate,
+      sgstRate: customSgstRate,
+      cgstAmount,
+      sgstAmount,
+      grandTotal,
       paymentMethod,
-      paymentMethod === 'cash' ? cashNum : undefined,
-      paymentMethod === 'cash' ? changeToReturn : undefined
+      paymentStatus: 'paid',
+      cashReceived: effectiveCashReceived,
+      changeGiven: effectiveChangeGiven,
+      paidAt: new Date().toISOString(),
+      cashierName: currentUser?.name || 'Cashier',
+    };
+
+    const success = settleBill(
+      finalBill,
+      paymentMethod,
+      effectiveCashReceived,
+      effectiveChangeGiven
     );
 
-    // Open receipt modal immediately
-    setSettledBill({
-      ...newBill,
-      paymentMethod,
-      cashReceived: paymentMethod === 'cash' ? cashNum : undefined,
-      changeGiven: paymentMethod === 'cash' ? changeToReturn : undefined,
-    });
+    if (success) {
+      // Open receipt modal immediately
+      setSettledBill(finalBill);
+      setCashTendered('');
+      setBillingError(null);
+    } else {
+      setBillingError('Failed to settle bill. Please check order and table details.');
+    }
   };
 
   return (
@@ -538,11 +575,18 @@ export const BillingView: React.FC = () => {
                 <span>PRINT BILL (₹{grandTotal.toFixed(2)})</span>
               </button>
 
+              {billingError && (
+                <div className="flex items-start gap-2 p-3 bg-rose-50 border border-rose-200 text-rose-800 text-xs rounded-lg animate-in fade-in">
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <span>{billingError}</span>
+                </div>
+              )}
+
               {/* Settle & Print Primary Button */}
               <button
                 type="button"
                 onClick={handleSettleAndPrint}
-                className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition-all shadow-sm flex items-center justify-center gap-2"
+                className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer"
               >
                 <CheckCircle2 className="w-4 h-4" />
                 <span>Mark Bill as Paid & Settle (₹{grandTotal.toFixed(2)})</span>
@@ -550,14 +594,6 @@ export const BillingView: React.FC = () => {
             </div>
           </div>
         </div>
-      )}
-
-      {/* Direct Thermal Bill Print Modal */}
-      {printBillPreview && (
-        <ReceiptModal
-          bill={printBillPreview}
-          onClose={() => setPrintBillPreview(null)}
-        />
       )}
 
       {/* Bill Receipt Modal after Settlement */}

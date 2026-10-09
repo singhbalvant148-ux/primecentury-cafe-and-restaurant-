@@ -16,6 +16,12 @@ import {
   Clock,
   SlidersHorizontal,
   Printer,
+  AlertTriangle,
+  XCircle,
+  X,
+  Loader2,
+  CheckCircle2,
+  RefreshCw,
 } from 'lucide-react';
 import { usePOS } from '../context/POSContext';
 import { MenuCategory, MenuItem, KOT } from '../types/pos';
@@ -36,10 +42,12 @@ export const MenuView: React.FC = () => {
     updateItemQuantity,
     removeItemFromOrder,
     sendKOT,
+    makeTableUnoccupied,
     setActiveView,
     currentUser,
     toggleMenuItemAvailability,
     deleteMenuItem,
+    printKOTThermal,
   } = usePOS();
 
   const [selectedSection, setSelectedSection] = useState<string>('All');
@@ -47,7 +55,9 @@ export const MenuView: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [itemNoteInput, setItemNoteInput] = useState<{ [itemId: string]: string }>({});
   const [editingNoteFor, setEditingNoteFor] = useState<string | null>(null);
-  const [kotSuccessMsg, setKotSuccessMsg] = useState<string | null>(null);
+  const [isSendingKOT, setIsSendingKOT] = useState(false);
+  const [isPrintingKOT, setIsPrintingKOT] = useState(false);
+  const [kotStatusMsg, setKotStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isMobileCartOpen, setIsMobileCartOpen] = useState(false);
   const [simulatedTime, setSimulatedTime] = useState<string | null>(null);
 
@@ -56,6 +66,7 @@ export const MenuView: React.FC = () => {
   const [itemToEdit, setItemToEdit] = useState<MenuItem | null>(null);
   const [itemToDelete, setItemToDelete] = useState<MenuItem | null>(null);
   const [ownerNotice, setOwnerNotice] = useState<string | null>(null);
+  const [isMakeUnoccupiedModalOpen, setIsMakeUnoccupiedModalOpen] = useState(false);
 
   // Active table
   const currentTableId = activeTableId || 1;
@@ -79,12 +90,51 @@ export const MenuView: React.FC = () => {
     )
   );
 
+  // Normalize search query: case-insensitive, collapse multiple spaces, multi-token matching
+  const normalizedSearch = searchQuery.trim().toLowerCase().replace(/\s+/g, ' ');
+  const searchTokens = normalizedSearch ? normalizedSearch.split(' ') : [];
+
   // Filtered menu items reading from this data structure (Pure Vegetarian)
   const filteredMenuItems = menuItems.filter((item) => {
     // Only available and vegetarian items can be ordered
     if (!item.isAvailable || !item.isVeg) return false;
     if (item.category?.toLowerCase().includes('non-veg')) return false;
     if (item.subcategory?.toLowerCase().includes('non-veg')) return false;
+
+    // Search query matching across name, category, subcategory, section, id, and description
+    if (searchTokens.length > 0) {
+      const searchableText = [
+        item.name,
+        item.category,
+        item.subcategory,
+        item.section,
+        item.id,
+        item.description,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+
+      const matchesAllTokens = searchTokens.every((token) => searchableText.includes(token));
+      if (!matchesAllTokens) return false;
+
+      // When searching, respect selected section if specified
+      if (selectedSection !== 'All' && item.section !== selectedSection) return false;
+
+      // Respect subcategory if specified
+      if (selectedCategory !== 'All') {
+        const subcat = item.subcategory || item.category;
+        const matchesCat =
+          subcat === selectedCategory ||
+          item.category === selectedCategory ||
+          item.subcategory === selectedCategory;
+        if (!matchesCat) return false;
+      }
+
+      return true;
+    }
+
+    // Normal browsing without search query
     if (selectedSection !== 'All' && item.section !== selectedSection) return false;
     const subcat = item.subcategory || item.category;
     if (
@@ -95,18 +145,30 @@ export const MenuView: React.FC = () => {
     ) {
       return false;
     }
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      return (
-        item.name.toLowerCase().includes(q) ||
-        (item.description && item.description.toLowerCase().includes(q)) ||
-        (item.section && item.section.toLowerCase().includes(q)) ||
-        (item.subcategory && item.subcategory.toLowerCase().includes(q)) ||
-        (item.category && item.category.toLowerCase().includes(q))
-      );
-    }
+
     return true;
   });
+
+  // Count search matches across all categories to help users when a category tab is currently active
+  const crossCategoryMatchesCount =
+    searchTokens.length > 0 && selectedCategory !== 'All'
+      ? menuItems.filter((item) => {
+          if (!item.isAvailable || !item.isVeg) return false;
+          if (selectedSection !== 'All' && item.section !== selectedSection) return false;
+          const searchableText = [
+            item.name,
+            item.category,
+            item.subcategory,
+            item.section,
+            item.id,
+            item.description,
+          ]
+            .filter(Boolean)
+            .join(' ')
+            .toLowerCase();
+          return searchTokens.every((token) => searchableText.includes(token));
+        }).length
+      : 0;
 
   // Totals
   const subtotal = orderItems.reduce((sum, it) => sum + it.price * it.quantity, 0);
@@ -132,41 +194,104 @@ export const MenuView: React.FC = () => {
   };
 
   const handleSendKOT = () => {
-    if (!activeOrder || orderItems.length === 0) return;
-    const res = sendKOT(activeOrder.id);
-    if (res.success) {
-      setKotSuccessMsg(`KOT #${res.kotNumber} sent to kitchen successfully!`);
-      setTimeout(() => setKotSuccessMsg(null), 4000);
-    } else {
-      setKotSuccessMsg(res.message || 'Unable to send KOT.');
-      setTimeout(() => setKotSuccessMsg(null), 3000);
+    if (!activeOrder || orderItems.length === 0 || isSendingKOT) return;
+    if (unsentItemsCount === 0) {
+      setKotStatusMsg({
+        type: 'error',
+        text: 'All items are already in kitchen queue. Add more dishes first.',
+      });
+      setTimeout(() => setKotStatusMsg(null), 3500);
+      return;
+    }
+
+    setIsSendingKOT(true);
+    try {
+      const res = sendKOT(activeOrder.id);
+      if (res.success) {
+        setKotStatusMsg({
+          type: 'success',
+          text: `KOT #${res.kotNumber} sent to kitchen (${unsentItemsCount} item${unsentItemsCount > 1 ? 's' : ''})!`,
+        });
+        setTimeout(() => setKotStatusMsg(null), 4500);
+      } else {
+        setKotStatusMsg({
+          type: 'error',
+          text: res.message || 'Unable to send KOT to kitchen.',
+        });
+        setTimeout(() => setKotStatusMsg(null), 3500);
+      }
+    } catch (err: any) {
+      console.error('[MenuView] Error sending KOT:', err);
+      setKotStatusMsg({
+        type: 'error',
+        text: err?.message || 'Error occurred while sending KOT.',
+      });
+      setTimeout(() => setKotStatusMsg(null), 3500);
+    } finally {
+      setIsSendingKOT(false);
     }
   };
 
-  const handlePrintKOTForTable = () => {
-    if (!activeOrder) return;
-    const tableKots = kots.filter((k) => k.orderId === activeOrder.id);
-    const targetKot = tableKots[tableKots.length - 1];
-    if (targetKot) {
-      setKotToPrint(targetKot);
-    } else if (orderItems.length > 0) {
-      const generatedKot: KOT = {
-        id: `kot-gen-${activeOrder.id}`,
-        kotNumber: activeOrder.orderNumber,
-        orderId: activeOrder.id,
-        tableId: activeOrder.tableId,
-        waiterName: activeOrder.waiterName,
-        items: activeOrder.items.map((it) => ({
-          menuItemId: it.menuItemId,
-          name: it.name,
-          quantity: it.quantity,
-          notes: it.notes,
-          isVeg: it.isVeg,
-        })),
-        status: 'new',
-        createdAt: activeOrder.createdAt,
-      };
-      setKotToPrint(generatedKot);
+  const handlePrintKOTForTable = async () => {
+    if (!activeOrder || orderItems.length === 0 || isPrintingKOT) return;
+    setIsPrintingKOT(true);
+    console.info(`[MenuView] Print KOT requested for Table ${currentTableId} (Order #${activeOrder.orderNumber})`);
+
+    try {
+      const tableKots = kots.filter((k) => k.orderId === activeOrder.id);
+      const targetKot = tableKots[tableKots.length - 1];
+      if (targetKot) {
+        setKotToPrint(targetKot);
+        const res = await printKOTThermal(targetKot, { isReprint: Boolean(targetKot.isPrinted) });
+        if (res.success) {
+          setKotStatusMsg({
+            type: 'success',
+            text: `KOT #${targetKot.kotNumber} dispatched to printer!`,
+          });
+          setTimeout(() => setKotStatusMsg(null), 3500);
+        } else {
+          setKotStatusMsg({
+            type: 'error',
+            text: res.error || 'Failed to open KOT print dialog.',
+          });
+          setTimeout(() => setKotStatusMsg(null), 3500);
+        }
+      } else if (orderItems.length > 0) {
+        const generatedKot: KOT = {
+          id: `kot-gen-${activeOrder.id}`,
+          kotNumber: activeOrder.orderNumber,
+          orderId: activeOrder.id,
+          tableId: activeOrder.tableId,
+          waiterName: currentUser?.name || activeOrder.waiterName || 'Staff',
+          items: activeOrder.items.map((it) => ({
+            menuItemId: it.menuItemId,
+            name: it.name,
+            quantity: it.quantity,
+            notes: it.notes,
+            isVeg: it.isVeg,
+          })),
+          status: 'new',
+          createdAt: activeOrder.createdAt,
+        };
+        setKotToPrint(generatedKot);
+        const res = await printKOTThermal(generatedKot);
+        if (res.success) {
+          setKotStatusMsg({
+            type: 'success',
+            text: `KOT slip for Table ${currentTable?.name || currentTableId} dispatched to printer!`,
+          });
+          setTimeout(() => setKotStatusMsg(null), 3500);
+        }
+      }
+    } catch (err: any) {
+      console.error('[MenuView] Error printing KOT:', err);
+      setKotStatusMsg({
+        type: 'error',
+        text: 'Failed to print KOT. Check printer connection.',
+      });
+      setTimeout(() => setKotStatusMsg(null), 3500);
+    } finally {
+      setIsPrintingKOT(false);
     }
   };
 
@@ -216,9 +341,21 @@ export const MenuView: React.FC = () => {
           >
             {currentTable?.status.toUpperCase()}
           </span>
+
+          {currentTable?.status === 'occupied' && (
+            <button
+              type="button"
+              onClick={() => setIsMakeUnoccupiedModalOpen(true)}
+              className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold text-rose-700 hover:text-white bg-rose-50 hover:bg-rose-600 border border-rose-200 hover:border-rose-600 rounded-md transition-all cursor-pointer shadow-2xs"
+              title="Make this table unoccupied and clear active order"
+            >
+              <XCircle className="w-3 h-3" />
+              <span>Make Unoccupied</span>
+            </button>
+          )}
         </div>
 
-        {/* Search Bar */}
+        {/* Search Bar in Top Bar */}
         <div className="relative flex-1 max-w-sm">
           <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-neutral-400">
             <Search className="w-3.5 h-3.5" />
@@ -227,9 +364,19 @@ export const MenuView: React.FC = () => {
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search menu dishes..."
-            className="w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border border-neutral-300 focus:outline-none focus:ring-2 focus:ring-neutral-900 bg-neutral-50"
+            placeholder="Search menu items..."
+            className="w-full pl-8 pr-8 py-1.5 text-xs rounded-lg border border-neutral-300 focus:outline-none focus:ring-2 focus:ring-neutral-900 bg-neutral-50"
           />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery('')}
+              className="absolute inset-y-0 right-0 pr-2.5 flex items-center text-neutral-400 hover:text-neutral-700 cursor-pointer"
+              title="Clear search"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
 
         {/* Owner Only: Add Menu Item & Manage Menu buttons */}
@@ -271,6 +418,50 @@ export const MenuView: React.FC = () => {
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
         {/* Left: Categories & Menu Grid */}
         <div className="lg:col-span-8 space-y-4">
+          {/* Prominent Menu Item Search Input at top of menu */}
+          <div className="bg-white rounded-xl border border-neutral-200 shadow-2xs p-2.5">
+            <div className="relative flex items-center">
+              <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-neutral-400">
+                <Search className="w-4 h-4" />
+              </div>
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search menu items..."
+                className="w-full pl-10 pr-10 py-2.5 text-sm rounded-lg border border-neutral-200 focus:outline-none focus:ring-2 focus:ring-neutral-900 bg-neutral-50/50 hover:bg-neutral-50 font-medium placeholder:text-neutral-400 transition-colors"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="absolute inset-y-0 right-0 pr-3 flex items-center text-neutral-400 hover:text-neutral-700 transition-colors cursor-pointer"
+                  title="Clear search"
+                >
+                  <X className="w-4 h-4 bg-neutral-200 rounded-full p-0.5 text-neutral-600 hover:bg-neutral-300" />
+                </button>
+              )}
+            </div>
+            {searchQuery && (
+              <div className="flex items-center justify-between px-2 pt-2 text-[11px] text-neutral-500">
+                <span>
+                  Showing {filteredMenuItems.length} matching dish{filteredMenuItems.length !== 1 ? 'es' : ''} for "{searchQuery}"
+                </span>
+                {selectedCategory !== 'All' && crossCategoryMatchesCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedCategory('All')}
+                    className="text-neutral-900 font-bold underline cursor-pointer"
+                  >
+                    View {crossCategoryMatchesCount} more in all categories
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* Section & Subcategory Tabs & Diet Filter */}
           <div className="space-y-2">
             {/* Section Tabs (if multiple sections exist, e.g. Food, Beverages) */}
@@ -604,25 +795,33 @@ export const MenuView: React.FC = () => {
           </div>
 
           {filteredMenuItems.length === 0 && (
-            <div className="bg-white border border-neutral-200 rounded-xl p-8 text-center text-neutral-500">
-              <p className="text-sm">No dishes found matching your criteria.</p>
+            <div className="bg-white border border-neutral-200 rounded-xl p-8 text-center text-neutral-500 shadow-2xs">
+              <Search className="w-8 h-8 mx-auto text-neutral-300 mb-2" />
+              <p className="text-sm font-bold text-neutral-800">No items found</p>
+              <p className="text-xs text-neutral-500 mt-1">
+                {searchQuery
+                  ? `No menu items match "${searchQuery}". Check the spelling, extra spaces, or search by category.`
+                  : 'No menu items found matching the selected category.'}
+              </p>
               <button
+                type="button"
                 onClick={() => {
                   setSelectedCategory('All');
+                  setSelectedSection('All');
                   setSearchQuery('');
                 }}
-                className="mt-2 text-xs font-semibold text-neutral-900 underline"
+                className="mt-3 px-3.5 py-1.5 text-xs font-bold text-white bg-neutral-900 hover:bg-neutral-800 rounded-lg shadow-2xs transition-colors cursor-pointer"
               >
-                Clear all filters
+                Clear Search &amp; Show All Items
               </button>
             </div>
           )}
         </div>
 
         {/* Right: Active Table Order Cart (Sticky on Desktop) */}
-        <div className="lg:col-span-4 bg-white border border-neutral-200 rounded-xl shadow-sm p-4 space-y-4 lg:sticky lg:top-20">
+        <div className="lg:col-span-4 bg-white border border-neutral-200 rounded-xl shadow-sm p-4 space-y-3 lg:sticky lg:top-20">
           {/* Cart Header */}
-          <div className="flex items-center justify-between pb-3 border-b border-neutral-200">
+          <div className="flex items-center justify-between pb-2.5 border-b border-neutral-200">
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-sm font-bold text-neutral-900">
@@ -641,21 +840,82 @@ export const MenuView: React.FC = () => {
             </span>
           </div>
 
-          {/* KOT Status Message with Print Option */}
-          {kotSuccessMsg && (
-            <div className="p-2.5 text-xs text-emerald-900 bg-emerald-50 border border-emerald-200 rounded-lg flex items-center justify-between gap-2 animate-in fade-in">
-              <div className="flex items-center gap-1.5 font-semibold">
-                <Check className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span>{kotSuccessMsg}</span>
-              </div>
+          {/* Immediate Quick Action Bar right near order items */}
+          {orderItems.length > 0 && (
+            <div className="grid grid-cols-2 gap-2 p-2 bg-neutral-50 rounded-xl border border-neutral-200">
+              <button
+                type="button"
+                onClick={handleSendKOT}
+                disabled={unsentItemsCount === 0 || isSendingKOT}
+                className={`py-2 px-2.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-2xs cursor-pointer ${
+                  unsentItemsCount > 0
+                    ? 'bg-purple-700 hover:bg-purple-800 text-white'
+                    : 'bg-neutral-200 text-neutral-400 cursor-not-allowed opacity-75'
+                }`}
+                title={
+                  unsentItemsCount > 0
+                    ? `Send ${unsentItemsCount} unsent item(s) to kitchen`
+                    : 'All items already sent to kitchen'
+                }
+              >
+                {isSendingKOT ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Sending...</span>
+                  </>
+                ) : (
+                  <>
+                    <ChefHat className="w-3.5 h-3.5" />
+                    <span>Send KOT {unsentItemsCount > 0 ? `(${unsentItemsCount})` : ''}</span>
+                  </>
+                )}
+              </button>
+
               <button
                 type="button"
                 onClick={handlePrintKOTForTable}
-                className="px-2 py-1 text-[11px] font-bold text-white bg-neutral-900 hover:bg-neutral-800 rounded flex items-center gap-1 cursor-pointer shrink-0 shadow-2xs"
-                title="Print KOT Ticket directly"
+                disabled={orderItems.length === 0 || isPrintingKOT}
+                className="py-2 px-2.5 rounded-lg text-xs font-bold text-neutral-800 bg-white hover:bg-neutral-100 border border-neutral-300 flex items-center justify-center gap-1.5 transition-colors shadow-2xs cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Print KOT ticket directly for kitchen printer"
               >
-                <Printer className="w-3 h-3" />
-                <span>Print</span>
+                {isPrintingKOT ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-neutral-600" />
+                    <span>Printing...</span>
+                  </>
+                ) : (
+                  <>
+                    <Printer className="w-3.5 h-3.5 text-neutral-700" />
+                    <span>Print KOT</span>
+                  </>
+                )}
+              </button>
+            </div>
+          )}
+
+          {/* KOT Status / Feedback Banner */}
+          {kotStatusMsg && (
+            <div
+              className={`p-2.5 text-xs rounded-xl flex items-center justify-between gap-2 border animate-in fade-in ${
+                kotStatusMsg.type === 'success'
+                  ? 'bg-emerald-50 text-emerald-900 border-emerald-200'
+                  : 'bg-rose-50 text-rose-900 border-rose-200'
+              }`}
+            >
+              <div className="flex items-center gap-1.5 font-semibold">
+                {kotStatusMsg.type === 'success' ? (
+                  <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                )}
+                <span>{kotStatusMsg.text}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setKotStatusMsg(null)}
+                className="text-neutral-400 hover:text-neutral-700 text-xs px-1 cursor-pointer"
+              >
+                ×
               </button>
             </div>
           )}
@@ -807,9 +1067,10 @@ export const MenuView: React.FC = () => {
                 <div className="grid grid-cols-2 gap-2">
                   {/* Send KOT Button */}
                   <button
+                    type="button"
                     onClick={handleSendKOT}
-                    disabled={unsentItemsCount === 0}
-                    className={`py-2 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors shadow-2xs cursor-pointer ${
+                    disabled={unsentItemsCount === 0 || isSendingKOT}
+                    className={`py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors shadow-2xs cursor-pointer ${
                       unsentItemsCount > 0
                         ? 'bg-purple-700 hover:bg-purple-800 text-white'
                         : 'bg-neutral-100 text-neutral-400 cursor-not-allowed'
@@ -820,12 +1081,22 @@ export const MenuView: React.FC = () => {
                         : 'All items already sent to kitchen'
                     }
                   >
-                    <ChefHat className="w-3.5 h-3.5" />
-                    <span>Send KOT {unsentItemsCount > 0 ? `(${unsentItemsCount})` : ''}</span>
+                    {isSendingKOT ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Sending...</span>
+                      </>
+                    ) : (
+                      <>
+                        <ChefHat className="w-3.5 h-3.5" />
+                        <span>Send KOT {unsentItemsCount > 0 ? `(${unsentItemsCount})` : ''}</span>
+                      </>
+                    )}
                   </button>
 
                   {/* Bill Button */}
                   <button
+                    type="button"
                     onClick={() => {
                       setActiveTableId(currentTableId);
                       setActiveView('billing');
@@ -841,18 +1112,149 @@ export const MenuView: React.FC = () => {
                 <button
                   type="button"
                   onClick={handlePrintKOTForTable}
-                  disabled={orderItems.length === 0}
+                  disabled={orderItems.length === 0 || isPrintingKOT}
                   className="w-full py-2 px-3 rounded-lg text-xs font-bold text-neutral-800 bg-white hover:bg-neutral-100 border border-neutral-300 flex items-center justify-center gap-1.5 transition-colors shadow-2xs cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                   title="Print KOT Ticket directly for kitchen printer"
                 >
-                  <Printer className="w-3.5 h-3.5 text-neutral-700" />
-                  <span>Print KOT Slip</span>
+                  {isPrintingKOT ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin text-neutral-600" />
+                      <span>Printing KOT...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Printer className="w-3.5 h-3.5 text-neutral-700" />
+                      <span>Print KOT Slip</span>
+                    </>
+                  )}
                 </button>
               </div>
             </div>
           )}
         </div>
       </div>
+
+      {/* Sticky Bottom Action Bar for Touchscreen / Tablet / Mobile Devices */}
+      {orderItems.length > 0 && (
+        <div className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-xs border-t border-neutral-300 shadow-xl px-4 py-2.5 lg:hidden flex items-center justify-between gap-3 animate-in slide-in-from-bottom">
+          <div className="min-w-0">
+            <div className="text-xs font-bold text-neutral-900 truncate">
+              {currentTable?.name || `Table ${currentTableId}`}: {totalItemCount} item{totalItemCount !== 1 ? 's' : ''}
+            </div>
+            <div className="text-xs font-extrabold text-neutral-900 font-mono-numbers">
+              ₹{subtotal.toLocaleString('en-IN')}
+              {unsentItemsCount > 0 && (
+                <span className="ml-1 text-[10px] text-amber-700 font-normal">
+                  ({unsentItemsCount} unsent)
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleSendKOT}
+              disabled={unsentItemsCount === 0 || isSendingKOT}
+              className={`py-2 px-3 rounded-lg text-xs font-bold flex items-center gap-1 shadow-2xs cursor-pointer ${
+                unsentItemsCount > 0
+                  ? 'bg-purple-700 hover:bg-purple-800 text-white'
+                  : 'bg-neutral-100 text-neutral-400 cursor-not-allowed'
+              }`}
+            >
+              {isSendingKOT ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <ChefHat className="w-3.5 h-3.5" />
+              )}
+              <span>Send KOT</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handlePrintKOTForTable}
+              disabled={isPrintingKOT}
+              className="py-2 px-2.5 rounded-lg text-xs font-bold text-neutral-800 bg-white border border-neutral-300 shadow-2xs flex items-center gap-1 cursor-pointer disabled:opacity-40"
+              title="Print KOT"
+            >
+              {isPrintingKOT ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin text-neutral-600" />
+              ) : (
+                <Printer className="w-3.5 h-3.5 text-neutral-700" />
+              )}
+              <span>Print</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTableId(currentTableId);
+                setActiveView('billing');
+              }}
+              className="py-2 px-3 rounded-lg text-xs font-bold text-white bg-neutral-900 hover:bg-neutral-800 shadow-2xs flex items-center gap-1 cursor-pointer"
+            >
+              <Receipt className="w-3.5 h-3.5" />
+              <span>Bill</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Make Unoccupied Confirmation Modal */}
+      {isMakeUnoccupiedModalOpen && currentTable && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
+          <div className="relative w-full max-w-md bg-white rounded-xl shadow-2xl border border-neutral-200 overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-4 bg-neutral-900 text-white">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-400" />
+                <h3 className="text-sm font-bold">Make Table Unoccupied</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsMakeUnoccupiedModalOpen(false)}
+                className="p-1 rounded-md text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors cursor-pointer"
+              >
+                <XCircle className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+                <div>
+                  <div className="text-xs font-bold text-neutral-900 mb-1">
+                    {currentTable.name} ({currentTable.section})
+                  </div>
+                  <p className="text-xs text-neutral-700 leading-relaxed font-medium">
+                    Are you sure you want to make this table unoccupied? The current unsaved/active order will be cleared.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsMakeUnoccupiedModalOpen(false)}
+                  className="px-4 py-2 text-xs font-semibold text-neutral-700 bg-white border border-neutral-300 hover:bg-neutral-50 rounded-lg transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    makeTableUnoccupied(currentTable.id);
+                    setIsMakeUnoccupiedModalOpen(false);
+                    setActiveView('tables');
+                  }}
+                  className="px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-lg transition-colors cursor-pointer shadow-sm"
+                >
+                  Yes, Make Unoccupied
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

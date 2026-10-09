@@ -304,8 +304,8 @@ export const ReportsView: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-neutral-100">
-              {bills.map((bill) => (
-                <tr key={bill.id} className="hover:bg-neutral-50/70 transition-colors">
+              {bills.map((bill, idx) => (
+                <tr key={`${bill.id}-${idx}`} className="hover:bg-neutral-50/70 transition-colors">
                   <td className="px-4 py-3 font-bold text-neutral-900 font-mono-numbers">
                     {bill.billNumber}
                   </td>

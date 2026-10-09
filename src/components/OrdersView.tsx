@@ -26,6 +26,8 @@ export const OrdersView: React.FC = () => {
     bills,
     kots,
     setKotToPrint,
+    printKOTThermal,
+    printBillThermal,
   } = usePOS();
 
   const [statusFilter, setStatusFilter] = useState<'all' | OrderStatus>('all');
@@ -59,28 +61,45 @@ export const OrdersView: React.FC = () => {
     setActiveView('billing');
   };
 
-  const handlePrintKOTForOrder = (order: Order) => {
+  const handlePrintKOTForOrder = async (order: Order) => {
+    console.info(`[OrdersView] Print KOT requested for order #${order.orderNumber}`);
     const existing = kots.find((k) => k.orderId === order.id);
-    if (existing) {
-      setKotToPrint(existing);
+    const targetKot: KOT = existing || {
+      id: `kot-gen-${order.id}`,
+      kotNumber: order.orderNumber,
+      orderId: order.id,
+      tableId: order.tableId,
+      waiterName: order.waiterName,
+      items: order.items.map((it) => ({
+        menuItemId: it.menuItemId,
+        name: it.name,
+        quantity: it.quantity,
+        notes: it.notes,
+        isVeg: it.isVeg,
+      })),
+      status: 'new',
+      createdAt: order.createdAt,
+    };
+    setKotToPrint(targetKot);
+    try {
+      await printKOTThermal(targetKot);
+    } catch (e) {
+      console.error('[OrdersView] Error printing KOT:', e);
+    }
+  };
+
+  const handleReprintBillForOrder = async (order: Order) => {
+    console.info(`[OrdersView] Reprint Bill requested for order #${order.orderNumber}`);
+    const matchedBill = bills.find((b) => b.orderId === order.id);
+    if (matchedBill) {
+      setBillToPrint(matchedBill);
+      try {
+        await printBillThermal(matchedBill);
+      } catch (e) {
+        console.error('[OrdersView] Error reprinting bill:', e);
+      }
     } else {
-      const generatedKot: KOT = {
-        id: `kot-gen-${order.id}`,
-        kotNumber: order.orderNumber,
-        orderId: order.id,
-        tableId: order.tableId,
-        waiterName: order.waiterName,
-        items: order.items.map((it) => ({
-          menuItemId: it.menuItemId,
-          name: it.name,
-          quantity: it.quantity,
-          notes: it.notes,
-          isVeg: it.isVeg,
-        })),
-        status: 'new',
-        createdAt: order.createdAt,
-      };
-      setKotToPrint(generatedKot);
+      console.warn(`[OrdersView] No settled bill found for order #${order.orderNumber}`);
     }
   };
 
@@ -182,7 +201,7 @@ export const OrdersView: React.FC = () => {
                   </td>
                 </tr>
               ) : (
-                filteredOrders.map((order) => {
+                filteredOrders.map((order, idx) => {
                   const itemCount = order.items.reduce((s, it) => s + it.quantity, 0);
                   const orderTotal = order.items.reduce((s, it) => s + it.price * it.quantity, 0);
                   const unsentCount = order.items.reduce(
@@ -191,7 +210,7 @@ export const OrdersView: React.FC = () => {
                   );
 
                   return (
-                    <tr key={order.id} className="hover:bg-neutral-50/70 transition-colors">
+                    <tr key={`${order.id}-${idx}`} className="hover:bg-neutral-50/70 transition-colors">
                       <td className="px-4 py-3 font-bold text-neutral-900 font-mono-numbers">
                         #{order.orderNumber}
                       </td>
@@ -274,6 +293,16 @@ export const OrdersView: React.FC = () => {
                               className="px-2.5 py-1 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded transition-colors"
                             >
                               Settle
+                            </button>
+                          )}
+
+                          {order.status === 'paid' && (
+                            <button
+                              onClick={() => handleReprintBillForOrder(order)}
+                              className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 rounded transition-colors"
+                              title="Reprint Customer Bill Receipt"
+                            >
+                              Reprint Bill
                             </button>
                           )}
                         </div>
@@ -379,9 +408,22 @@ export const OrdersView: React.FC = () => {
                       setActiveView('menu');
                       setSelectedOrder(null);
                     }}
-                    className="px-4 py-2 text-xs font-semibold text-white bg-neutral-900 rounded-lg hover:bg-neutral-800 cursor-pointer"
+                    className="px-4 py-2 text-xs font-semibold text-neutral-800 bg-neutral-100 hover:bg-neutral-200 rounded-lg cursor-pointer transition-colors"
                   >
                     Edit in Menu Cart
+                  </button>
+                )}
+                {selectedOrder.status !== 'paid' && (
+                  <button
+                    onClick={() => {
+                      setActiveTableId(selectedOrder.tableId);
+                      setActiveView('billing');
+                      setSelectedOrder(null);
+                    }}
+                    className="px-4 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg cursor-pointer transition-colors flex items-center gap-1.5 shadow-2xs"
+                  >
+                    <Receipt className="w-3.5 h-3.5" />
+                    <span>Settle Bill</span>
                   </button>
                 )}
               </div>
