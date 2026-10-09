@@ -17,7 +17,6 @@ import {
   PrinterPaperWidth,
   PrinterMode,
   PrinterStatus,
-  DailySalesResponse,
 } from '../types/pos';
 import {
   INITIAL_USERS,
@@ -63,9 +62,6 @@ interface POSContextType {
   activeView: AppView;
   setActiveView: (view: AppView) => void;
   hasPermission: (view: AppView) => boolean;
-  authToken: string | null;
-  deleteBill: (billId: string) => Promise<{ success: boolean; message?: string }>;
-  fetchDailySales: (dateString: string) => Promise<DailySalesResponse | null>;
 
   // Users Management
   users: User[];
@@ -184,7 +180,6 @@ interface POSContextType {
 
 const STORAGE_KEYS = {
   USER: 'my_pos_user',
-  AUTH_TOKEN: 'my_pos_auth_token',
   USERS: 'my_pos_users_list',
   TABLES: 'my_pos_tables',
   MENU: 'my_pos_menu',
@@ -302,48 +297,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [activeTableId, setActiveTableId] = useState<number | null>(1);
   const [billToPrint, setBillToPrint] = useState<Bill | null>(null);
   const [kotToPrint, setKotToPrint] = useState<KOT | null>(null);
-
-  // Authenticated cryptographic session token
-  const [authToken, setAuthToken] = useState<string | null>(() => {
-    try {
-      return localStorage.getItem(STORAGE_KEYS.AUTH_TOKEN);
-    } catch {
-      return null;
-    }
-  });
-
-  // Verify or auto-obtain cryptographic session token
-  useEffect(() => {
-    const savedToken = localStorage.getItem(STORAGE_KEYS.AUTH_TOKEN);
-    if (savedToken) {
-      fetch('/api/auth/verify', {
-        headers: { Authorization: `Bearer ${savedToken}` },
-      })
-        .then((res) => {
-          if (!res.ok) {
-            localStorage.removeItem(STORAGE_KEYS.AUTH_TOKEN);
-            setAuthToken(null);
-          } else {
-            setAuthToken(savedToken);
-          }
-        })
-        .catch(() => {});
-    } else if (currentUser) {
-      fetch('/api/auth/quick-login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: currentUser.role }),
-      })
-        .then((res) => res.json())
-        .then((data) => {
-          if (data.success && data.token) {
-            setAuthToken(data.token);
-            localStorage.setItem(STORAGE_KEYS.AUTH_TOKEN, data.token);
-          }
-        })
-        .catch(() => {});
-    }
-  }, [currentUser?.role]);
 
   // Bluetooth Thermal Printer state
   const [printerStatus, setPrinterStatus] = useState<PrinterStatus>(bluetoothPrinter.getStatus());
@@ -552,18 +505,10 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const saved = localStorage.getItem(STORAGE_KEYS.ORDERS);
       if (saved) {
         const parsed: Order[] = JSON.parse(saved);
-        const seenIds = new Set<string>();
-        const uniqueOrders: Order[] = [];
-        for (const ord of parsed) {
-          if (ord && ord.id && !seenIds.has(ord.id)) {
-            seenIds.add(ord.id);
-            uniqueOrders.push({
-              ...ord,
-              items: (ord.items || []).filter((it) => it.isVeg && !it.name.toLowerCase().includes('chicken')),
-            });
-          }
-        }
-        return uniqueOrders;
+        return parsed.map((ord) => ({
+          ...ord,
+          items: ord.items.filter((it) => it.isVeg && !it.name.toLowerCase().includes('chicken')),
+        }));
       }
     } catch (e) {
       console.error(e);
@@ -646,13 +591,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [subcategories]);
 
   useEffect(() => {
-    const seenIds = new Set<string>();
-    const uniqueOrders = orders.filter((o) => {
-      if (!o || !o.id || seenIds.has(o.id)) return false;
-      seenIds.add(o.id);
-      return true;
-    });
-    localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(uniqueOrders));
+    localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
   }, [orders]);
 
   useEffect(() => {
@@ -727,17 +666,17 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   }, []);
 
-  // Permissions helper (Strict Owner-Only Daily Sales / Reports Access)
+  // Permissions helper
   const hasPermission = (view: AppView): boolean => {
     if (!currentUser) return false;
     const role = currentUser.role;
     switch (role) {
       case 'owner':
-        return true; // ONLY Owner can access 'reports' (Daily Sales), 'menu_management' and 'users'
+        return true; // ONLY the Owner can access 'menu_management' and 'users'
       case 'manager':
-        return ['dashboard', 'tables', 'menu', 'orders', 'kitchen', 'billing'].includes(view);
+        return ['dashboard', 'tables', 'menu', 'orders', 'kitchen', 'billing', 'reports'].includes(view);
       case 'cashier':
-        return ['dashboard', 'tables', 'menu', 'orders', 'billing'].includes(view);
+        return ['dashboard', 'tables', 'menu', 'orders', 'billing', 'reports'].includes(view);
       case 'waiter':
         return ['dashboard', 'tables', 'menu', 'orders', 'kitchen'].includes(view);
       case 'kitchen':
@@ -781,22 +720,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setCurrentUser(cleanUser);
-
-    // Secure backend token generation & verification
-    fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: cleanUsername, password: cleanPass }),
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.success && data.token) {
-          setAuthToken(data.token);
-          localStorage.setItem(STORAGE_KEYS.AUTH_TOKEN, data.token);
-        }
-      })
-      .catch((err) => console.warn('Server auth login warning:', err));
-
     if (found.role === 'kitchen') {
       setActiveView('kitchen');
     } else {
@@ -820,22 +743,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         createdAt: found.createdAt,
       };
       setCurrentUser(cleanUser);
-
-      // Secure backend token for role
-      fetch('/api/auth/quick-login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role }),
-      })
-        .then((res) => res.json())
-        .then((data) => {
-          if (data.success && data.token) {
-            setAuthToken(data.token);
-            localStorage.setItem(STORAGE_KEYS.AUTH_TOKEN, data.token);
-          }
-        })
-        .catch((err) => console.warn('Server quick-login warning:', err));
-
       if (found.role === 'kitchen') {
         setActiveView('kitchen');
       } else {
@@ -846,9 +753,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const logout = () => {
     setCurrentUser(null);
-    setAuthToken(null);
-    localStorage.removeItem(STORAGE_KEYS.USER);
-    localStorage.removeItem(STORAGE_KEYS.AUTH_TOKEN);
   };
 
   // User Management Methods (Owner ONLY)
@@ -1138,8 +1042,8 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const existing = orders.find((o) => o.tableId === tableId && o.status === 'active');
     if (existing) return existing;
 
-    const maxOrderNum = orders.reduce((max, o) => Math.max(max, o.orderNumber || 0), 1000);
-    const newOrderNumber = maxOrderNum + 1;
+    const newOrderNumber =
+      orders.length > 0 ? Math.max(...orders.map((o) => o.orderNumber)) + 1 : 1001;
     const newOrder: Order = {
       id: `ORD-${newOrderNumber}`,
       orderNumber: newOrderNumber,
@@ -1150,11 +1054,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       items: [],
     };
 
-    setOrders((prev) => {
-      const existingInPrev = prev.find((o) => o.tableId === tableId && o.status === 'active');
-      if (existingInPrev) return prev;
-      return [newOrder, ...prev.filter((o) => o.id !== newOrder.id)];
-    });
+    setOrders((prev) => [newOrder, ...prev]);
 
     // Update table status to occupied
     setTables((prev) =>
@@ -1162,9 +1062,9 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         t.id === tableId
           ? {
               ...t,
-              status: t.status === 'billed' ? 'billed' : 'occupied',
+              status: 'occupied',
               activeOrderId: newOrder.id,
-              occupiedSince: t.occupiedSince || new Date().toISOString(),
+              occupiedSince: new Date().toISOString(),
             }
           : t
       )
@@ -1180,46 +1080,37 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       targetOrder = createOrGetOrderForTable(tableId);
     }
 
-    setOrders((prevOrders) => {
-      let ordToUpdate = prevOrders.find((o) => o.tableId === tableId && o.status === 'active');
-      let isNew = false;
-      if (!ordToUpdate) {
-        ordToUpdate = targetOrder!;
-        isNew = true;
-      }
+    setOrders((prevOrders) =>
+      prevOrders.map((ord) => {
+        if (ord.id !== targetOrder!.id) return ord;
 
-      // Check if item with same ID and notes already exists
-      const existingItemIndex = ordToUpdate.items.findIndex(
-        (i) => i.menuItemId === menuItem.id && (i.notes || '') === (notes || '')
-      );
-
-      let updatedItems: OrderItem[];
-      if (existingItemIndex >= 0) {
-        updatedItems = ordToUpdate.items.map((item, idx) =>
-          idx === existingItemIndex ? { ...item, quantity: item.quantity + 1 } : item
+        // Check if item with same ID and notes already exists
+        const existingItemIndex = ord.items.findIndex(
+          (i) => i.menuItemId === menuItem.id && (i.notes || '') === (notes || '')
         );
-      } else {
-        const newItem: OrderItem = {
-          id: `oi-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-          menuItemId: menuItem.id,
-          name: menuItem.name,
-          price: menuItem.price,
-          quantity: 1,
-          isVeg: menuItem.isVeg ?? true,
-          notes: notes?.trim() || undefined,
-          kotSentQuantity: 0,
-        };
-        updatedItems = [...ordToUpdate.items, newItem];
-      }
 
-      const updated = { ...ordToUpdate, items: updatedItems };
+        let updatedItems: OrderItem[];
+        if (existingItemIndex >= 0) {
+          updatedItems = ord.items.map((item, idx) =>
+            idx === existingItemIndex ? { ...item, quantity: item.quantity + 1 } : item
+          );
+        } else {
+          const newItem: OrderItem = {
+            id: `oi-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            menuItemId: menuItem.id,
+            name: menuItem.name,
+            price: menuItem.price,
+            quantity: 1,
+            isVeg: menuItem.isVeg ?? true,
+            notes: notes?.trim() || undefined,
+            kotSentQuantity: 0,
+          };
+          updatedItems = [...ord.items, newItem];
+        }
 
-      if (isNew) {
-        return [updated, ...prevOrders.filter((o) => o.id !== updated.id)];
-      }
-
-      return prevOrders.map((ord) => (ord.id === updated.id ? updated : ord));
-    });
+        return { ...ord, items: updatedItems };
+      })
+    );
 
     // Ensure table is occupied
     setTables((prev) =>
@@ -1228,7 +1119,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? {
               ...t,
               status: t.status === 'billed' ? 'billed' : 'occupied',
-              activeOrderId: targetOrder.id,
+              activeOrderId: targetOrder!.id,
               occupiedSince: t.occupiedSince || new Date().toISOString(),
             }
           : t
@@ -1553,98 +1444,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return updated;
     });
 
-    // 4. Sync settled bill to server database
-    try {
-      const token = authToken || localStorage.getItem(STORAGE_KEYS.AUTH_TOKEN);
-      fetch('/api/bills', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify(finalBill),
-      }).catch((e) => console.warn('Could not sync settled bill to server:', e));
-    } catch (e) {
-      console.error(e);
-    }
-
     return true;
-  };
-
-  // Owner-Only Bill Deletion Method
-  const deleteBill = async (billId: string): Promise<{ success: boolean; message?: string }> => {
-    if (!currentUser || currentUser.role !== 'owner') {
-      return {
-        success: false,
-        message: 'Forbidden: Only an authenticated Owner can delete bills from the system.',
-      };
-    }
-
-    const targetBill = bills.find((b) => b.id === billId);
-    if (!targetBill) {
-      return {
-        success: false,
-        message: `Bill with ID "${billId}" not found in current ledger.`,
-      };
-    }
-
-    const token = authToken || localStorage.getItem(STORAGE_KEYS.AUTH_TOKEN);
-    try {
-      const res = await fetch(`/api/bills/${encodeURIComponent(billId)}`, {
-        method: 'DELETE',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-      });
-
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        return {
-          success: false,
-          message: errJson.error || `Server rejected deletion (HTTP ${res.status}).`,
-        };
-      }
-    } catch (e) {
-      console.warn('Network call failed, applying client deletion fallback:', e);
-    }
-
-    // Safely remove bill from state & localStorage
-    setBills((prev) => {
-      const updated = prev.filter((b) => b.id !== billId);
-      try {
-        localStorage.setItem(STORAGE_KEYS.BILLS, JSON.stringify(updated));
-      } catch (e) {
-        console.error(e);
-      }
-      return updated;
-    });
-
-    return {
-      success: true,
-      message: `Bill ${targetBill.billNumber} (₹${targetBill.grandTotal.toFixed(2)}) deleted successfully.`,
-    };
-  };
-
-  // Owner-Only Daily Sales Fetcher
-  const fetchDailySales = async (dateString: string): Promise<DailySalesResponse | null> => {
-    if (!currentUser || currentUser.role !== 'owner') {
-      return null;
-    }
-    const token = authToken || localStorage.getItem(STORAGE_KEYS.AUTH_TOKEN);
-    try {
-      const res = await fetch(`/api/reports/daily-sales?date=${encodeURIComponent(dateString)}`, {
-        headers: {
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-      });
-      if (res.ok) {
-        return await res.json();
-      }
-    } catch (err) {
-      console.error('Error fetching daily sales from server:', err);
-    }
-    return null;
   };
 
   // Settings
@@ -2357,9 +2157,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateKOTStatus,
         generateBillForOrder,
         settleBill,
-        deleteBill,
-        fetchDailySales,
-        authToken,
         billToPrint,
         setBillToPrint,
         kotToPrint,

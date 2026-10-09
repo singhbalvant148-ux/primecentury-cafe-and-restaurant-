@@ -201,7 +201,7 @@ export const OrdersView: React.FC = () => {
                   </td>
                 </tr>
               ) : (
-                filteredOrders.map((order, idx) => {
+                filteredOrders.map((order) => {
                   const itemCount = order.items.reduce((s, it) => s + it.quantity, 0);
                   const orderTotal = order.items.reduce((s, it) => s + it.price * it.quantity, 0);
                   const unsentCount = order.items.reduce(
@@ -210,7 +210,7 @@ export const OrdersView: React.FC = () => {
                   );
 
                   return (
-                    <tr key={`${order.id}-${idx}`} className="hover:bg-neutral-50/70 transition-colors">
+                    <tr key={order.id} className="hover:bg-neutral-50/70 transition-colors">
                       <td className="px-4 py-3 font-bold text-neutral-900 font-mono-numbers">
                         #{order.orderNumber}
                       </td>

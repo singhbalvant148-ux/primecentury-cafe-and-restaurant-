@@ -135,32 +135,6 @@ export interface Bill {
   printCount?: number;
 }
 
-export interface DailySalesMetrics {
-  totalSales: number;
-  totalOrders: number;
-  avgOrderValue: number;
-  totalDiscount: number;
-  totalCGST: number;
-  totalSGST: number;
-  totalTax: number;
-  netTaxable: number;
-  cashTotal: number;
-  upiTotal: number;
-  cardTotal: number;
-  cashCount?: number;
-  upiCount?: number;
-  cardCount?: number;
-}
-
-export interface DailySalesResponse {
-  success: boolean;
-  date: string;
-  bills: Bill[];
-  metrics: DailySalesMetrics;
-  topItems: [string, { qty: number; total: number; isVeg: boolean }][];
-  error?: string;
-}
-
 export type PrinterPaperWidth = '58mm' | '80mm';
 export type PrinterMode = 'bluetooth' | 'system' | 'auto';
 export type PrinterStatus = 'connected' | 'disconnected' | 'connecting' | 'error';
