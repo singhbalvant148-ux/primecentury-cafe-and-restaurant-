@@ -141,7 +141,7 @@ export const UsersView: React.FC = () => {
   };
 
   // Submit Add User
-  const handleAddSubmit = (e: React.FormEvent) => {
+  const handleAddSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setAddError('');
 
@@ -155,7 +155,7 @@ export const UsersView: React.FC = () => {
       return;
     }
 
-    const res = addUser({
+    const res = await addUser({
       name: addForm.name,
       username: addForm.username,
       password: addForm.password,
@@ -182,12 +182,12 @@ export const UsersView: React.FC = () => {
   };
 
   // Submit Edit User
-  const handleEditSubmit = (e: React.FormEvent) => {
+  const handleEditSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingEmployee) return;
     setEditError('');
 
-    const res = editUser(editingEmployee.id, {
+    const res = await editUser(editingEmployee.id, {
       name: editForm.name,
       username: editForm.username,
       role: editForm.role,
@@ -212,7 +212,7 @@ export const UsersView: React.FC = () => {
   };
 
   // Submit Reset Password (double-entry verification)
-  const handleResetPasswordSubmit = (e: React.FormEvent) => {
+  const handleResetPasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!resetPasswordEmployee) return;
     setResetError('');
@@ -227,7 +227,7 @@ export const UsersView: React.FC = () => {
       return;
     }
 
-    const res = resetUserPassword(resetPasswordEmployee.id, newPasswordInput);
+    const res = await resetUserPassword(resetPasswordEmployee.id, newPasswordInput);
     if (res.success) {
       setResetPasswordEmployee(null);
       showNotification(
@@ -239,8 +239,8 @@ export const UsersView: React.FC = () => {
   };
 
   // Toggle Status
-  const handleToggleStatus = (u: User) => {
-    const res = toggleUserStatus(u.id);
+  const handleToggleStatus = async (u: User) => {
+    const res = await toggleUserStatus(u.id);
     if (res.success) {
       showNotification(
         u.isActive ? `User "${u.name}" disabled.` : `User "${u.name}" enabled.`
@@ -251,8 +251,8 @@ export const UsersView: React.FC = () => {
   };
 
   // Delete User
-  const handleDeleteEmployee = (u: User) => {
-    const res = deleteUser(u.id);
+  const handleDeleteEmployee = async (u: User) => {
+    const res = await deleteUser(u.id);
     if (res.success) {
       setConfirmDeleteEmployee(null);
       showNotification(`User "${u.name}" deleted successfully.`);

@@ -187,7 +187,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenSettings }) => {
                         type="button"
                         onClick={() => {
                           setRoleMenuOpen(false);
-                          logout();
+                          void logout();
                         }}
                         className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
                       >
@@ -215,7 +215,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenSettings }) => {
 
             {/* Logout */}
             <button
-              onClick={logout}
+              onClick={() => void logout()}
               className="p-2 rounded-lg text-neutral-500 hover:text-rose-600 hover:bg-rose-50 transition-colors"
               title="Sign Out"
             >

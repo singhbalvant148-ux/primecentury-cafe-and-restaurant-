@@ -21,16 +21,18 @@ export const LoginView: React.FC = () => {
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  const handleManualSubmit = (e: React.FormEvent) => {
+  const handleManualSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setIsLoading(true);
 
     try {
-      const res = login(username, password);
+      const res = await login(username, password);
       if (!res.success) {
         setError(res.message || 'Invalid username or password.');
       }
+    } catch (err: any) {
+      setError(err?.message || 'Login failed. Please check network connection.');
     } finally {
       setIsLoading(false);
     }

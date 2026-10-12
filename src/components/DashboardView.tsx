@@ -111,10 +111,10 @@ export const DashboardView: React.FC = () => {
     setIsAddEmployeeModalOpen(true);
   };
 
-  const handleAddSubmit = (e: React.FormEvent) => {
+  const handleAddSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setAddError('');
-    const res = addUser({
+    const res = await addUser({
       name: addForm.name,
       username: addForm.username,
       password: addForm.password,
@@ -138,11 +138,11 @@ export const DashboardView: React.FC = () => {
     setEditError('');
   };
 
-  const handleEditSubmit = (e: React.FormEvent) => {
+  const handleEditSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingEmployee) return;
     setEditError('');
-    const res = editUser(editingEmployee.id, {
+    const res = await editUser(editingEmployee.id, {
       name: editForm.name,
       username: editForm.username,
       role: editForm.role,
@@ -163,7 +163,7 @@ export const DashboardView: React.FC = () => {
     setShowResetPassword(false);
   };
 
-  const handleResetPasswordSubmit = (e: React.FormEvent) => {
+  const handleResetPasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!resetPasswordEmployee) return;
     setResetError('');
@@ -171,7 +171,7 @@ export const DashboardView: React.FC = () => {
       setResetError('Passwords do not match. Please re-enter.');
       return;
     }
-    const res = resetUserPassword(resetPasswordEmployee.id, newPassword);
+    const res = await resetUserPassword(resetPasswordEmployee.id, newPassword);
     if (res.success) {
       setResetPasswordEmployee(null);
       showNotification(`Password for "${resetPasswordEmployee.name}" reset successfully.`);
@@ -180,8 +180,8 @@ export const DashboardView: React.FC = () => {
     }
   };
 
-  const handleToggleStatus = (emp: User) => {
-    const res = toggleUserStatus(emp.id);
+  const handleToggleStatus = async (emp: User) => {
+    const res = await toggleUserStatus(emp.id);
     if (res.success) {
       showNotification(
         emp.isActive

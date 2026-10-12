@@ -56,9 +56,9 @@ export type AppView =
 
 interface POSContextType {
   currentUser: User | null;
-  login: (username: string, pass: string) => { success: boolean; message?: string };
-  quickLogin: (role: UserRole) => void;
-  logout: () => void;
+  login: (username: string, pass: string) => Promise<{ success: boolean; message?: string }>;
+  quickLogin: (role: UserRole) => Promise<void>;
+  logout: () => Promise<void>;
   activeView: AppView;
   setActiveView: (view: AppView) => void;
   hasPermission: (view: AppView) => boolean;
@@ -70,17 +70,17 @@ interface POSContextType {
     username: string;
     password: string;
     role: UserRole;
-  }) => { success: boolean; message?: string };
+  }) => Promise<{ success: boolean; message?: string }>;
   editUser: (
     userId: string,
     data: { name: string; username: string; role: UserRole }
-  ) => { success: boolean; message?: string };
-  toggleUserStatus: (userId: string) => { success: boolean; message?: string };
+  ) => Promise<{ success: boolean; message?: string }>;
+  toggleUserStatus: (userId: string) => Promise<{ success: boolean; message?: string }>;
   resetUserPassword: (
     userId: string,
     newPassword: string
-  ) => { success: boolean; message?: string };
-  deleteUser: (userId: string) => { success: boolean; message?: string };
+  ) => Promise<{ success: boolean; message?: string }>;
+  deleteUser: (userId: string) => Promise<{ success: boolean; message?: string }>;
   
   // Data
   tables: Table[];
@@ -179,6 +179,7 @@ interface POSContextType {
 }
 
 const STORAGE_KEYS = {
+  TOKEN: 'my_pos_auth_token',
   USER: 'my_pos_user',
   USERS: 'my_pos_users_list',
   TABLES: 'my_pos_tables',
@@ -236,34 +237,9 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const saved = localStorage.getItem(STORAGE_KEYS.USERS);
       if (saved) {
         const parsed: any[] = JSON.parse(saved);
-        // Ensure admin owner account exists and all users use salted passwordHash
-        const upgraded: User[] = parsed.map((u) => {
-          let hash = u.passwordHash;
-          if (!hash && u.password) {
-            hash = hashPassword(u.password);
-          }
-          if (!hash) {
-            const foundInit = INITIAL_USERS.find(
-              (init) => init.username.toLowerCase() === u.username.toLowerCase()
-            );
-            hash = foundInit?.passwordHash || hashPassword('123456');
-          }
-          return {
-            id: String(u.id),
-            username: String(u.username),
-            name: String(u.name),
-            passwordHash: hash,
-            role: u.role,
-            isActive: typeof u.isActive === 'boolean' ? u.isActive : true,
-            createdAt: u.createdAt || new Date().toISOString(),
-          };
-        });
-
-        const hasAdmin = upgraded.some((u) => u.username.toLowerCase() === 'admin');
-        if (!hasAdmin) {
-          return [INITIAL_USERS[0], ...upgraded];
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
         }
-        return upgraded;
       }
     } catch (e) {
       console.error(e);
@@ -271,26 +247,30 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return INITIAL_USERS;
   });
 
-  // Current user (defaults to the Owner account)
+  // Current user: MUST NOT default to Owner. Fresh sessions / shared URLs must show LoginView!
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     try {
+      const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
       const saved = localStorage.getItem(STORAGE_KEYS.USER);
-      if (saved) {
+      if (token && saved) {
         const parsed = JSON.parse(saved);
-        return {
-          id: String(parsed.id),
-          username: String(parsed.username),
-          name: String(parsed.name),
-          passwordHash: parsed.passwordHash || '',
-          role: parsed.role,
-          isActive: Boolean(parsed.isActive),
-          createdAt: parsed.createdAt || new Date().toISOString(),
-        };
+        if (parsed && parsed.id && parsed.role) {
+          return {
+            id: String(parsed.id),
+            username: String(parsed.username),
+            name: String(parsed.name),
+            passwordHash: parsed.passwordHash || '',
+            role: parsed.role,
+            isActive: Boolean(parsed.isActive),
+            createdAt: parsed.createdAt || new Date().toISOString(),
+          };
+        }
       }
     } catch (e) {
       console.error(e);
     }
-    return INITIAL_USERS[0];
+    // Shared URLs and unauthenticated browsers MUST see the LoginView
+    return null;
   });
 
   const [activeView, setActiveView] = useState<AppView>('dashboard');
@@ -606,6 +586,76 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(settings));
   }, [settings]);
 
+  // Synchronize users and validate current session against backend
+  const refreshUsersFromBackend = async () => {
+    try {
+      const res = await fetch('/api/users');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && Array.isArray(data.users) && data.users.length > 0) {
+          setUsers(data.users);
+          localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(data.users));
+
+          // If current logged-in user's name or role was updated by owner, keep currentUser synchronized
+          setCurrentUser((prevUser) => {
+            if (!prevUser) return null;
+            const updated = data.users.find((u: User) => u.id === prevUser.id);
+            if (updated && (updated.name !== prevUser.name || updated.role !== prevUser.role)) {
+              const merged = { ...prevUser, name: updated.name, role: updated.role };
+              localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(merged));
+              return merged;
+            }
+            return prevUser;
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('[POSContext] Could not reach /api/users:', err);
+    }
+  };
+
+  // Validate session on backend and start periodic synchronization
+  useEffect(() => {
+    const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
+    if (token) {
+      fetch('/api/auth/me', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+        .then((res) => {
+          if (!res.ok) {
+            // Invalid, expired, or disabled session: clear and show login
+            localStorage.removeItem(STORAGE_KEYS.TOKEN);
+            localStorage.removeItem(STORAGE_KEYS.USER);
+            setCurrentUser(null);
+            return null;
+          }
+          return res.json();
+        })
+        .then((data) => {
+          if (data?.success && data.user) {
+            setCurrentUser(data.user);
+            localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(data.user));
+          }
+        })
+        .catch((err) => {
+          console.warn('[POSContext] Session check warning:', err);
+        });
+    }
+
+    // Refresh users from database
+    refreshUsersFromBackend();
+
+    // Poll every 20 seconds and on tab focus to guarantee staff names never revert or go stale
+    const interval = setInterval(refreshUsersFromBackend, 20000);
+    const handleFocus = () => refreshUsersFromBackend();
+    window.addEventListener('focus', handleFocus);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, []);
+
   // Reconcile and self-heal tables: ensure any table linked to a paid or missing order is marked available
   useEffect(() => {
     setTables((prevTables) => {
@@ -686,82 +736,101 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // Auth
-  const login = (username: string, pass: string): { success: boolean; message?: string } => {
+  // Auth: authenticate on backend and store isolated session token
+  const login = async (
+    username: string,
+    pass: string
+  ): Promise<{ success: boolean; message?: string }> => {
     const cleanUsername = username.trim().toLowerCase();
     const cleanPass = pass.trim();
 
-    const found = users.find((u) => u.username.toLowerCase() === cleanUsername);
-    if (!found) {
-      return { success: false, message: 'Invalid username or password.' };
-    }
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: cleanUsername, password: cleanPass }),
+      });
 
-    if (!found.isActive) {
-      return {
-        success: false,
-        message: 'This account has been disabled. Please contact the Owner.',
-      };
-    }
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        return { success: false, message: data.error || 'Invalid username or password.' };
+      }
 
-    const isMatch = verifyPassword(cleanPass, found.passwordHash || (found as any).password);
-    if (!isMatch) {
-      return { success: false, message: 'Invalid username or password.' };
-    }
+      // Store authenticated session token for this client only
+      localStorage.setItem(STORAGE_KEYS.TOKEN, data.token);
+      localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(data.user));
+      setCurrentUser(data.user);
 
-    // Set clean current user without plain text
-    const cleanUser: User = {
-      id: found.id,
-      username: found.username,
-      name: found.name,
-      passwordHash: found.passwordHash,
-      role: found.role,
-      isActive: found.isActive,
-      createdAt: found.createdAt,
-    };
+      // Refresh users list immediately from backend
+      await refreshUsersFromBackend();
 
-    setCurrentUser(cleanUser);
-    if (found.role === 'kitchen') {
-      setActiveView('kitchen');
-    } else {
-      setActiveView('dashboard');
-    }
-    return { success: true };
-  };
-
-  const quickLogin = (role: UserRole) => {
-    const found =
-      users.find((u) => u.role === role && u.isActive) ||
-      users.find((u) => u.role === role);
-    if (found) {
-      const cleanUser: User = {
-        id: found.id,
-        username: found.username,
-        name: found.name,
-        passwordHash: found.passwordHash,
-        role: found.role,
-        isActive: found.isActive,
-        createdAt: found.createdAt,
-      };
-      setCurrentUser(cleanUser);
-      if (found.role === 'kitchen') {
+      if (data.user.role === 'kitchen') {
         setActiveView('kitchen');
       } else {
         setActiveView('dashboard');
       }
+
+      return { success: true };
+    } catch (err: any) {
+      console.warn('[POSContext] Login network error, attempting local verification:', err);
+      const found = users.find((u) => u.username.toLowerCase() === cleanUsername);
+      if (found && verifyPassword(cleanPass, found.passwordHash || (found as any).password)) {
+        if (!found.isActive) {
+          return { success: false, message: 'This account has been disabled. Please contact the Owner.' };
+        }
+        const offlineToken = `offline-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+        localStorage.setItem(STORAGE_KEYS.TOKEN, offlineToken);
+        localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(found));
+        setCurrentUser(found);
+        setActiveView(found.role === 'kitchen' ? 'kitchen' : 'dashboard');
+        return { success: true };
+      }
+      return { success: false, message: 'Invalid username or password, or server unavailable.' };
     }
   };
 
-  const logout = () => {
+  const quickLogin = async (role: UserRole) => {
+    const defaultPasswords: Record<UserRole, string> = {
+      owner: 'Kite@29',
+      manager: 'mgr123',
+      cashier: 'cash123',
+      waiter: 'wait123',
+      kitchen: 'kitchen123',
+    };
+
+    const targetUser = users.find((u) => u.role === role && u.isActive) || users.find((u) => u.role === role);
+    if (targetUser) {
+      const pass = defaultPasswords[role] || '123456';
+      await login(targetUser.username, pass);
+    }
+  };
+
+  const logout = async () => {
+    const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
+    if (token) {
+      try {
+        await fetch('/api/auth/logout', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
+      } catch (e) {
+        console.warn('[POSContext] Error logging out on server:', e);
+      }
+    }
+    localStorage.removeItem(STORAGE_KEYS.TOKEN);
+    localStorage.removeItem(STORAGE_KEYS.USER);
     setCurrentUser(null);
   };
 
-  // User Management Methods (Owner ONLY)
-  const addUser = (userData: {
+  // User Management Methods (Owner ONLY) - Permanently saved to backend database
+  const addUser = async (userData: {
     name: string;
     username: string;
     password: string;
     role: UserRole;
-  }): { success: boolean; message?: string } => {
+  }): Promise<{ success: boolean; message?: string }> => {
     if (currentUser?.role !== 'owner') {
       return { success: false, message: 'Permission Denied: ONLY the Owner can create staff users.' };
     }
@@ -772,34 +841,40 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!userData.name.trim()) {
       return { success: false, message: 'Full name is required.' };
     }
-    if (!userData.password.trim()) {
-      return { success: false, message: 'Password is required.' };
-    }
-    if (users.some((u) => u.username.toLowerCase() === cleanUsername)) {
-      return {
-        success: false,
-        message: `Username "${userData.username.trim()}" is already in use. Please choose another.`,
-      };
+    if (!userData.password.trim() || userData.password.trim().length < 4) {
+      return { success: false, message: 'Password must be at least 4 characters long.' };
     }
 
-    const newUser: User = {
-      id: `usr-${Date.now()}`,
-      name: userData.name.trim(),
-      username: userData.username.trim(),
-      passwordHash: hashPassword(userData.password.trim()),
-      role: userData.role,
-      isActive: true,
-      createdAt: new Date().toISOString(),
-    };
+    const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
+    try {
+      const res = await fetch('/api/users', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(userData),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        return { success: false, message: data.error || 'Could not create staff user.' };
+      }
 
-    setUsers((prev) => [...prev, newUser]);
-    return { success: true };
+      setUsers((prev) => {
+        const next = [...prev, data.user];
+        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(next));
+        return next;
+      });
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, message: 'Network or database error: Unable to create staff user.' };
+    }
   };
 
-  const editUser = (
+  const editUser = async (
     userId: string,
     data: { name: string; username: string; role: UserRole }
-  ): { success: boolean; message?: string } => {
+  ): Promise<{ success: boolean; message?: string }> => {
     if (currentUser?.role !== 'owner') {
       return { success: false, message: 'Permission Denied: ONLY the Owner can edit users or roles.' };
     }
@@ -811,87 +886,102 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: 'Full name is required.' };
     }
 
-    // Check if new username conflicts with another existing user
-    const existing = users.find(
-      (u) => u.id !== userId && u.username.toLowerCase() === cleanUsername
-    );
-    if (existing) {
-      return {
-        success: false,
-        message: `Username "${data.username.trim()}" is already in use by another staff member.`,
-      };
-    }
-
-    // Safety check: Cannot demote the last active owner
-    const target = users.find((u) => u.id === userId);
-    if (target?.role === 'owner' && data.role !== 'owner') {
-      const otherOwners = users.filter(
-        (u) => u.role === 'owner' && u.isActive && u.id !== userId
-      );
-      if (otherOwners.length === 0) {
-        return { success: false, message: 'Cannot change the role of the only remaining active Owner.' };
-      }
-    }
-
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id !== userId) return u;
-        return {
-          ...u,
+    const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
+    try {
+      const res = await fetch(`/api/users/${userId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
           name: data.name.trim(),
           username: data.username.trim(),
           role: data.role,
+        }),
+      });
+
+      const resData = await res.json();
+      if (!res.ok || !resData.success) {
+        return {
+          success: false,
+          message: resData.error || 'Failed to update staff member in database.',
         };
-      })
-    );
+      }
 
-    // If current logged-in user was updated, keep currentUser state in sync
-    if (currentUser?.id === userId) {
-      setCurrentUser((prev) =>
-        prev
-          ? {
-              ...prev,
-              name: data.name.trim(),
-              username: data.username.trim(),
-              role: data.role,
-            }
-          : null
-      );
+      const updatedUser: User = resData.user;
+
+      // Update state and localStorage
+      setUsers((prev) => {
+        const next = prev.map((u) => (u.id === userId ? updatedUser : u));
+        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(next));
+        return next;
+      });
+
+      // If current logged-in user was updated, keep currentUser state in sync
+      if (currentUser?.id === userId) {
+        setCurrentUser(updatedUser);
+        localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(updatedUser));
+      }
+
+      // Update order attribution in state for active orders created by this staff member
+      const oldUser = users.find((u) => u.id === userId);
+      if (oldUser && oldUser.name !== updatedUser.name) {
+        setOrders((prevOrders) => {
+          const updatedOrders = prevOrders.map((ord) =>
+            ord.waiterName === oldUser.name
+              ? { ...ord, waiterName: updatedUser.name }
+              : ord
+          );
+          localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(updatedOrders));
+          return updatedOrders;
+        });
+      }
+
+      return { success: true };
+    } catch (err: any) {
+      console.error('[POSContext] Error updating staff user:', err);
+      return {
+        success: false,
+        message: 'Network or database error: Unable to save updated staff member.',
+      };
     }
-
-    return { success: true };
   };
 
-  const toggleUserStatus = (userId: string): { success: boolean; message?: string } => {
+  const toggleUserStatus = async (
+    userId: string
+  ): Promise<{ success: boolean; message?: string }> => {
     if (currentUser?.role !== 'owner') {
       return { success: false, message: 'Permission Denied: ONLY the Owner can disable or enable users.' };
     }
-    if (currentUser?.id === userId) {
-      return { success: false, message: 'You cannot disable your own active account.' };
-    }
-
-    const target = users.find((u) => u.id === userId);
-    if (!target) return { success: false, message: 'User not found.' };
-
-    if (target.role === 'owner' && target.isActive) {
-      const otherActiveOwners = users.filter(
-        (u) => u.role === 'owner' && u.isActive && u.id !== userId
-      );
-      if (otherActiveOwners.length === 0) {
-        return { success: false, message: 'Cannot disable the only active Owner account.' };
+    const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
+    try {
+      const res = await fetch(`/api/users/${userId}/status`, {
+        method: 'PUT',
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        return { success: false, message: data.error || 'Could not update user status.' };
       }
-    }
 
-    setUsers((prev) =>
-      prev.map((u) => (u.id === userId ? { ...u, isActive: !u.isActive } : u))
-    );
-    return { success: true };
+      setUsers((prev) => {
+        const next = prev.map((u) => (u.id === userId ? data.user : u));
+        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(next));
+        return next;
+      });
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, message: 'Network or database error: Unable to update user status.' };
+    }
   };
 
-  const resetUserPassword = (
+  const resetUserPassword = async (
     userId: string,
     newPassword: string
-  ): { success: boolean; message?: string } => {
+  ): Promise<{ success: boolean; message?: string }> => {
     if (currentUser?.role !== 'owner') {
       return { success: false, message: 'Permission Denied: ONLY the Owner can change or reset user passwords.' };
     }
@@ -899,37 +989,52 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: 'New password cannot be empty.' };
     }
 
-    const hashed = hashPassword(newPassword.trim());
-
-    setUsers((prev) =>
-      prev.map((u) => (u.id === userId ? { ...u, passwordHash: hashed, password: undefined } : u))
-    );
-
-    if (currentUser?.id === userId) {
-      setCurrentUser((prev) => (prev ? { ...prev, passwordHash: hashed, password: undefined } : null));
+    const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
+    try {
+      const res = await fetch(`/api/users/${userId}/password`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ password: newPassword.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        return { success: false, message: data.error || 'Could not reset password.' };
+      }
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, message: 'Network or database error: Unable to reset password.' };
     }
-
-    return { success: true };
   };
 
-  const deleteUser = (userId: string): { success: boolean; message?: string } => {
+  const deleteUser = async (userId: string): Promise<{ success: boolean; message?: string }> => {
     if (currentUser?.role !== 'owner') {
       return { success: false, message: 'Permission Denied: ONLY the Owner can delete users.' };
     }
-    if (currentUser?.id === userId) {
-      return { success: false, message: 'You cannot delete your own active account.' };
-    }
-    const target = users.find((u) => u.id === userId);
-    if (!target) return { success: false, message: 'User not found.' };
-    if (target.role === 'owner') {
-      const otherOwners = users.filter((u) => u.role === 'owner' && u.id !== userId);
-      if (otherOwners.length === 0) {
-        return { success: false, message: 'Cannot delete the only Owner.' };
+    const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
+    try {
+      const res = await fetch(`/api/users/${userId}`, {
+        method: 'DELETE',
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        return { success: false, message: data.error || 'Could not delete user.' };
       }
-    }
 
-    setUsers((prev) => prev.filter((u) => u.id !== userId));
-    return { success: true };
+      setUsers((prev) => {
+        const next = prev.filter((u) => u.id !== userId);
+        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(next));
+        return next;
+      });
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, message: 'Network or database error: Unable to delete user.' };
+    }
   };
 
   // Add Table (Owner/Admin Only)
